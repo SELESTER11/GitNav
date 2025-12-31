@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { fetchRepoTree, fetchRepoInfo } from '../utils/githubAPI.js';
 import { categorizeFiles, buildFileTree, findKeyFiles } from '../utils/analyzer.js';
 import Onboarding from './Onboarding.jsx';
-import Summary from './Summary.jsx';
 import Search from './Search.jsx';
 import CodebaseMap from './CodebaseMap.jsx';
 import KeyFiles from './KeyFiles.jsx';
@@ -91,11 +90,6 @@ export default function Sidebar({ owner, repo }) {
         <Onboarding 
           repoData={repoData} 
           keyFiles={keyFiles}
-          fileTree={fileTree}
-        />
-
-        <Summary 
-          repoData={repoData}
           fileTree={fileTree}
         />
 
