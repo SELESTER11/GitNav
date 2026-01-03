@@ -1,6 +1,6 @@
 # Privacy Policy for GitNav
 
-**Last Updated:** January 2, 2025
+**Last Updated:** December 31, 2025
 
 ## Overview
 
