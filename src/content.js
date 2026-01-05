@@ -62,7 +62,7 @@
         return headers;
     }
 
-    // Configuration
+
     const CONFIG = {
         CACHE_DURATION: 30 * 60 * 1000, // 30 minutes
         MAX_FILES_IN_GRAPH: 60,
@@ -143,22 +143,22 @@
         if (!commits || !Array.isArray(commits) || commits.length === 0) {
             return [];
         }
-        
-        const validCommits = commits.filter(commit => 
+
+        const validCommits = commits.filter(commit =>
             commit && commit.commit && commit.commit.author && commit.commit.author.date
         );
-        
+
         if (validCommits.length === 0) {
             return [];
         }
-        
-        // Try months first
+
+
         const monthlyData = {};
         validCommits.forEach(commit => {
             try {
                 const date = new Date(commit.commit.author.date);
                 const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-                
+
                 if (!monthlyData[monthKey]) {
                     monthlyData[monthKey] = {
                         key: monthKey,
@@ -173,10 +173,10 @@
                 console.warn('Invalid commit date:', e);
             }
         });
-        
+
         const monthlyTimeline = Object.values(monthlyData).sort((a, b) => a.date - b.date);
-        
-        // If we have 2+ months of data, use monthly view
+
+
         if (monthlyTimeline.length >= 2) {
             let totalCommits = 0;
             const result = monthlyTimeline.map(month => {
@@ -190,8 +190,8 @@
             });
             return result.slice(-12); // Last 12 months
         }
-        
-        // Try weeks if not enough months
+
+
         const weeklyData = {};
         validCommits.forEach(commit => {
             try {
@@ -199,7 +199,7 @@
                 const weekStart = new Date(date);
                 weekStart.setDate(date.getDate() - date.getDay()); // Start of week
                 const weekKey = weekStart.toISOString().split('T')[0];
-                
+
                 if (!weeklyData[weekKey]) {
                     weeklyData[weekKey] = {
                         key: weekKey,
@@ -214,10 +214,10 @@
                 console.warn('Invalid commit date:', e);
             }
         });
-        
+
         const weeklyTimeline = Object.values(weeklyData).sort((a, b) => a.date - b.date);
-        
-        // If we have 2+ weeks of data, use weekly view
+
+
         if (weeklyTimeline.length >= 2) {
             let totalCommits = 0;
             const result = weeklyTimeline.map(week => {
@@ -231,14 +231,14 @@
             });
             return result.slice(-12); // Last 12 weeks
         }
-        
-        // Fall back to daily view for very new repos
+
+
         const dailyData = {};
         validCommits.forEach(commit => {
             try {
                 const date = new Date(commit.commit.author.date);
                 const dayKey = date.toISOString().split('T')[0];
-                
+
                 if (!dailyData[dayKey]) {
                     dailyData[dayKey] = {
                         key: dayKey,
@@ -253,9 +253,9 @@
                 console.warn('Invalid commit date:', e);
             }
         });
-        
+
         const dailyTimeline = Object.values(dailyData).sort((a, b) => a.date - b.date);
-        
+
         if (dailyTimeline.length >= 2) {
             let totalCommits = 0;
             const result = dailyTimeline.map(day => {
@@ -269,8 +269,8 @@
             });
             return result.slice(-14); // Last 14 days
         }
-        
-        // If only 1 day with commits, still show it
+
+
         if (dailyTimeline.length === 1) {
             return [{
                 label: dailyTimeline[0].label,
@@ -279,7 +279,7 @@
                 unit: 'day'
             }];
         }
-        
+
         return [];
     }
 
@@ -304,7 +304,7 @@
         }
 
         if (queryIndex === query.length) {
-            // All characters matched, bonus for exact prefix match
+
             if (text.startsWith(query)) score += 100;
             return score;
         }
@@ -314,7 +314,7 @@
 
     const GITHUB_API = 'https://api.github.com';
 
-    // State
+
     let globalData = null;
     let repoCache = {};
     let rateLimitInterval = null;
@@ -334,7 +334,7 @@
     function injectButton() {
         const existing = document.getElementById('codebase-nav-button');
         if (existing) return;
-    
+
         const container = document.createElement('div');
         container.id = 'codebase-nav-button';
         container.style.cssText = `
@@ -344,7 +344,7 @@
             z-index: 999999 !important;
             transition: right 0.3s ease !important;
         `;
-    
+
         const button = document.createElement('button');
         button.textContent = 'Analyze Codebase';
         button.style.cssText = `
@@ -363,8 +363,8 @@
             position: relative !important;
             overflow: hidden !important;
         `;
-    
-        // Add keyframe animations to the page
+
+
         if (!document.getElementById('gitnav-button-animations')) {
             const style = document.createElement('style');
             style.id = 'gitnav-button-animations';
@@ -400,30 +400,30 @@
             `;
             document.head.appendChild(style);
         }
-    
+
         button.onmouseover = () => {
             button.style.background = '#2ea043 !important';
             button.style.transform = 'scale(1.05) !important';
             button.style.animation = 'none !important';
         };
-    
+
         button.onmouseout = () => {
             button.style.background = '#238636 !important';
             button.style.transform = 'scale(1) !important';
             button.style.animation = 'buttonPulse 2s ease-in-out infinite !important';
         };
-    
-        // CRITICAL FIX: Prevent the click from affecting GitHub's page
+
+
         button.onclick = (e) => {
-            // Stop ALL event propagation
+
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
-            
-            // NUCLEAR: Temporarily disable ALL input fields on the page
+
+
             const allInputs = document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])');
             const disabledInputs = [];
-            
+
             allInputs.forEach(input => {
                 if (!input.disabled && !input.closest('#codebase-navigator-sidebar')) {
                     input.disabled = true;
@@ -431,23 +431,23 @@
                     disabledInputs.push(input);
                 }
             });
-            
-            // Blur any currently focused element (especially GitHub's search)
+
+
             if (document.activeElement) {
                 document.activeElement.blur();
             }
-            
-            // Remove focus from the button itself
+
+
             button.blur();
-            
-            // Focus the body to ensure nothing else gets focus
+
+
             document.body.focus();
-            
-            // Call openSidebar and re-enable inputs after
+
+
             setTimeout(() => {
                 openSidebar();
-                
-                // Re-enable inputs after 500ms
+
+
                 setTimeout(() => {
                     disabledInputs.forEach(input => {
                         input.disabled = false;
@@ -456,114 +456,114 @@
                 }, 500);
             }, 10);
         };
-        
-        // EXTRA: Prevent mousedown/mouseup from propagating too
+
+
         button.onmousedown = (e) => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
-        
+
         button.onmouseup = (e) => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
-        
-        // NUCLEAR: Prevent any keyboard events too
+
+
         button.onkeydown = (e) => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
-        
+
         button.onkeyup = (e) => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
-        
+
         button.onkeypress = (e) => {
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
         };
-    
+
         container.appendChild(button);
         document.body.appendChild(container);
-    
+
         console.log('Button injected successfully');
     }
 
-    // Update the openSidebar() function to move the button:
+
 
     async function openSidebar() {
         console.log('Button clicked!');
-        
-        // STEP 1: Disable ALL GitHub inputs FIRST
+
+
         const githubInputs = Array.from(document.querySelectorAll('input, textarea'))
             .filter(el => !el.closest('#codebase-navigator-sidebar'));
-        
+
         githubInputs.forEach(input => {
             input.dataset.wasDisabled = input.disabled;
             input.disabled = true;
             input.readOnly = true;
             input.value = ''; // Clear any autofilled values
         });
-        
-        // STEP 2: Blur any active element
+
+
         if (document.activeElement && document.activeElement !== document.body) {
             document.activeElement.blur();
         }
-        
-        // STEP 3: Clear any selections
+
+
         if (window.getSelection) {
             window.getSelection().removeAllRanges();
         }
-        
-        // STEP 4: Focus body to ensure nothing else gets focus
+
+
         document.body.focus();
-    
+
         const existing = document.getElementById('codebase-navigator-sidebar');
         const buttonContainer = document.getElementById('codebase-nav-button');
-    
+
         if (existing) {
             existing.remove();
-            // Move button back to original position
+
             if (buttonContainer) {
                 buttonContainer.style.right = '30px';
             }
-            
-            // Re-enable GitHub inputs
+
+
             githubInputs.forEach(input => {
                 input.disabled = input.dataset.wasDisabled === 'true';
                 input.readOnly = false;
                 delete input.dataset.wasDisabled;
             });
-            
+
             return;
         }
-    
-        // Move button to the left to avoid sidebar
+
+
         if (buttonContainer) {
             buttonContainer.style.right = '530px';
         }
-    
+
         const path = window.location.pathname.split('/').filter(p => p);
         const owner = path[0];
         const repo = path[1];
-    
+
         console.log('Opening sidebar for:', owner, '/', repo);
-    
+
         const sidebar = createSidebar(owner, repo);
-        
-        // Add anti-autofill attribute to the sidebar itself
+
+
         sidebar.setAttribute('data-lpignore', 'true');
         sidebar.setAttribute('data-1p-ignore', 'true');
-        
+
         document.body.appendChild(sidebar);
-        
-        // Re-enable GitHub inputs after sidebar is rendered
+
+
         setTimeout(() => {
             githubInputs.forEach(input => {
                 input.disabled = input.dataset.wasDisabled === 'true';
@@ -571,7 +571,7 @@
                 delete input.dataset.wasDisabled;
             });
         }, 1000);
-    
+
         try {
             const data = await fetchRepoData(owner, repo);
             globalData = data;
@@ -600,7 +600,7 @@
             overflow-y: auto;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             color: #c9d1d9;
-          }
+            }
 
           .search-filter-btn {
             padding: 6px 12px;
@@ -634,7 +634,7 @@
             justify-content: space-between;
             align-items: center;
             z-index: 10;
-          }
+            }
           .sidebar-title {
             font-size: 16px;
             font-weight: 600;
@@ -657,27 +657,17 @@
             color: #c9d1d9;
             border-radius: 6px;
           }
+
           .nav-tabs {
+            position: sticky;
+            top: 64px;
             display: flex;
             background: #161b22;
             border-bottom: 1px solid #30363d;
-            position: sticky;
-            top: 64px;
-            z-index: 9;
-            overflow-x: auto;
-          }
-          .nav-tabs {
-            display: flex;
-            background: #161b22;
-            border-bottom: 1px solid #30363d;
-            position: sticky;
-            top: 64px;
             z-index: 9;
             overflow-x: auto;
             overflow-y: hidden;
-            scrollbar-width: thin;
-            scrollbar-color: #30363d #161b22;
-          }
+            }
           
           .nav-tabs::-webkit-scrollbar {
             height: 4px;
@@ -1229,25 +1219,41 @@
         </style>
 
 
+        <div class="sidebar-fixed-top">
         <div class="sidebar-header">
-  <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
-    <img src="${chrome.runtime.getURL('icons/logo32light.png')}" 
-         alt="GitNav Logo" 
-         style="width: 32px; height: 32px; border-radius: 6px;" />
-    <div style="flex: 1;">
-      <h2 class="sidebar-title" style="margin: 0;">${owner}/${repo}</h2>
-      <div id="rate-limit-status" style="font-size: 11px; color: #8b949e; margin-top: 4px;"></div>
-    </div>
-  </div>
-  <button class="close-btn" id="close-sidebar">&times;</button>
-</div>
+            <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
+            <img src="${chrome.runtime.getURL('icons/logo32light.png')}" 
+                alt="GitNav Logo" 
+                style="width: 32px; height: 32px; border-radius: 6px;" />
+            <div style="flex: 1;">
+                <h2 class="sidebar-title" style="margin: 0;">${owner}/${repo}</h2>
+                <div id="rate-limit-status" style="font-size: 11px; color: #8b949e; margin-top: 4px;"></div>
+            </div>
+            </div>
+            <button class="close-btn" id="close-sidebar">&times;</button>
+        </div>
+
+        <div class="nav-tabs">
+            <button class="nav-tab active" data-tab="overview">Overview</button>
+            <button class="nav-tab" data-tab="visualize">Visualize</button>
+            <button class="nav-tab" data-tab="tools">Tools</button>
+            <button class="nav-tab" data-tab="search">Search</button>
+            <button class="nav-tab" data-tab="insights">Insights</button>
+            <button class="nav-tab" data-tab="metrics">Metrics</button>
+            <button class="nav-tab" data-tab="tree">Tree</button>
+            <button class="nav-tab" data-tab="contributors">People</button>
+            <button class="nav-tab" data-tab="dependencies">Deps</button>
+            <button class="nav-tab" data-tab="tech">Tech</button>
+            <button class="nav-tab" data-tab="security">Security</button>
+            <button class="nav-tab" data-tab="about">About</button>
+        </div>
 
 
         <div id="token-setup-banner" style="display: none;">
           <div class="token-setup">
-            <div style="font-weight: 600; margin-bottom: 4px;">🔒 Private Repository Detected</div>
+            <div style="font-weight: 600; margin-bottom: 4px;">Private Repository Detected</div>
                 <div style="color: #8b949e; margin-bottom: 8px;">
-                 Add a GitHub token to access private repositories
+                 Add a GitHub token to access private repositories and increase API rate limits.
                     </div>
                         <div class="token-input-group">
                         <input type="password" class="token-input" id="github-token-input" placeholder="ghp_xxxxxxxxxxxx">
@@ -1261,21 +1267,6 @@
               </a>
             </div>
           </div>
-        </div>
-
-        <div class="nav-tabs">
-          <button class="nav-tab active" data-tab="overview">Overview</button>
-          <button class="nav-tab" data-tab="visualize">Visualize</button>
-          <button class="nav-tab" data-tab="tools">Tools</button>
-          <button class="nav-tab" data-tab="search">Search</button>
-          <button class="nav-tab" data-tab="insights">Insights</button>
-          <button class="nav-tab" data-tab="metrics">Metrics</button>
-          <button class="nav-tab" data-tab="tree">Tree</button>
-          <button class="nav-tab" data-tab="contributors">People</button>
-          <button class="nav-tab" data-tab="dependencies">Deps</button>
-          <button class="nav-tab" data-tab="tech">Tech</button>
-          <button class="nav-tab" data-tab="security">Security</button>
-          <button class="nav-tab" data-tab="about">About</button>
         </div>
 
         <div id="sidebar-main-content">
@@ -1306,7 +1297,7 @@
                 dot.style.transform = 'scale(1.5)';
                 dot.style.zIndex = '10';
             });
-        
+
             dot.addEventListener('mouseleave', () => {
                 dot.style.transform = 'scale(1)';
                 dot.style.zIndex = '1';
@@ -1327,7 +1318,7 @@
                     return;
                 }
 
-                // Test token
+
                 try {
                     const headers = { 'Authorization': `token ${token}` };
                     const test = await fetch(`${GITHUB_API}/user`, { headers });
@@ -1363,20 +1354,20 @@
         try {
             const headers = await getAuthHeaders();
             const response = await fetch(`${GITHUB_API}/rate_limit`, { headers });
-            
+
             if (!response.ok) {
                 console.warn('Could not fetch rate limit');
                 return;
             }
-            
+
             const data = await response.json();
             const display = document.getElementById('rate-limit-status');
-    
+
             if (display) {
                 const remaining = data.rate.remaining;
                 const limit = data.rate.limit;
                 const resetTime = new Date(data.rate.reset * 1000).toLocaleTimeString();
-    
+
                 if (remaining < CONFIG.API_RATE_LIMIT_WARNING) {
                     display.style.color = '#da3633';
                     display.textContent = `${remaining}/${limit} API requests left (resets at ${resetTime})`;
@@ -1386,30 +1377,30 @@
                 }
             }
         } catch (e) {
-            
+
         }
     }
 
     async function fetchRepoData(owner, repo) {
         const cacheKey = `${owner}/${repo}`;
         const now = Date.now();
-    
-        // Check cache first
+
+
         if (repoCache[cacheKey] && (now - repoCache[cacheKey].timestamp) < CONFIG.CACHE_DURATION) {
             console.log('Using cached data for', cacheKey);
-            // ADDED: Restore the default branch from cache
+
             globalDefaultBranch = repoCache[cacheKey].defaultBranch || 'main';
             return repoCache[cacheKey].data;
         }
-    
+
         console.log('Fetching:', `${GITHUB_API}/repos/${owner}/${repo}`);
-    
+
         try {
             const headers = await getAuthHeaders();
-    
-            // Fetch repo info first
+
+
             const infoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers });
-    
+
             if (!infoRes.ok) {
                 if (infoRes.status === 403) {
                     const rateLimitRes = await fetch(`${GITHUB_API}/rate_limit`, { headers });
@@ -1425,45 +1416,45 @@
                     throw new Error(`Failed to fetch repository info (Status: ${infoRes.status})`);
                 }
             }
-    
+
             const info = await infoRes.json();
             const defaultBranch = info.default_branch || 'main';
-            
-            // ADDED: Store the default branch globally
+
+
             globalDefaultBranch = defaultBranch;
-    
+
             console.log('Default branch:', defaultBranch);
-    
-            // Try default branch first, then fallback
+
+
             let treeRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, { headers });
-    
+
             if (!treeRes.ok) {
                 console.log(`Branch ${defaultBranch} failed, trying alternative...`);
                 const altBranch = defaultBranch === 'main' ? 'master' : 'main';
                 treeRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/trees/${altBranch}?recursive=1`, { headers });
-    
+
                 if (!treeRes.ok) {
                     throw new Error(`Could not fetch repository tree. Tried branches: ${defaultBranch}, ${altBranch}`);
                 }
-                // ADDED: Update global branch if we used alternative
+
                 globalDefaultBranch = altBranch;
             }
-    
-            // Fetch commits and contributors (non-blocking)
+
+
             const [commitsRes, contributorsRes] = await Promise.all([
                 fetch(`${GITHUB_API}/repos/${owner}/${repo}/commits?per_page=30`, { headers }).catch(() => null),
                 fetch(`${GITHUB_API}/repos/${owner}/${repo}/contributors?per_page=10`, { headers }).catch(() => null)
             ]);
-    
+
             const tree = await treeRes.json();
             const commits = commitsRes && commitsRes.ok ? await commitsRes.json() : [];
             const contributors = contributorsRes && contributorsRes.ok ? await contributorsRes.json() : [];
-    
+
             const files = tree.tree.filter(f => f.type === 'blob');
             const folders = tree.tree.filter(f => f.type === 'tree');
-    
+
             console.log(`✓ Loaded ${files.length} files, ${folders.length} folders`);
-    
+
             const data = {
                 info,
                 files,
@@ -1479,16 +1470,16 @@
                 metrics: calculateCodeMetrics(files, commits),
                 security: analyzeSecurityIssues(files, info)
             };
-    
-            // Store in cache
+
+
             repoCache[cacheKey] = {
                 data: data,
                 timestamp: now,
                 defaultBranch: globalDefaultBranch  // ADDED: Store default branch in cache
             };
-    
+
             console.log('✓ Data cached for', cacheKey);
-    
+
             return data;
         } catch (error) {
             console.error('Fetch error:', error);
@@ -1707,20 +1698,20 @@
             unusedDeps: [],
             heavyDeps: []
         };
-    
-        const bundleFiles = files.filter(f => 
+
+        const bundleFiles = files.filter(f =>
             f.path.match(/\.(js|jsx|ts|tsx|css|scss|sass|json)$/i) &&
             !f.path.includes('node_modules') &&
             !f.path.includes('test') &&
             !f.path.includes('spec')
         );
-    
+
         bundleFiles.forEach(file => {
             const ext = file.path.split('.').pop().toLowerCase();
             metrics.bundleSize.total += file.size || 0;
             metrics.bundleSize.byType[ext] = (metrics.bundleSize.byType[ext] || 0) + (file.size || 0);
         });
-    
+
         metrics.bundleSize.largest = bundleFiles
             .filter(f => f.size > 50000)
             .sort((a, b) => b.size - a.size)
@@ -1730,20 +1721,20 @@
                 size: f.size,
                 percentage: ((f.size / metrics.bundleSize.total) * 100).toFixed(1)
             }));
-    
+
         const allDeps = [
             ...dependencies.npm,
             ...dependencies.python,
             ...dependencies.flutter,
             ...dependencies.rust
         ];
-    
+
         if (allDeps.length > 0) {
             const codeContent = files
                 .filter(f => f.path.match(/\.(js|jsx|ts|tsx|py|dart|rs)$/i))
                 .map(f => f.path.toLowerCase())
                 .join(' ');
-    
+
             metrics.unusedDeps = allDeps
                 .filter(dep => {
                     const depName = dep.name.toLowerCase();
@@ -1752,7 +1743,7 @@
                 .slice(0, 5)
                 .map(dep => dep.name);
         }
-    
+
         const heavyPackages = {
             'moment': '~300KB',
             'lodash': '~70KB',
@@ -1766,7 +1757,7 @@
             'antd': '~1.2MB',
             'chart.js': '~200KB'
         };
-    
+
         allDeps.forEach(dep => {
             if (heavyPackages[dep.name]) {
                 metrics.heavyDeps.push({
@@ -1776,7 +1767,7 @@
                 });
             }
         });
-    
+
         return metrics;
     }
 
@@ -1826,7 +1817,7 @@
             structure: []
         };
 
-        // Maintainability scoring
+
         const largeFiles = files.filter(f => f.size > 100000);
         if (largeFiles.length > 10) {
             scores.maintainability -= 30;
@@ -1842,14 +1833,14 @@
             issues.maintainability.push(`${veryLargeFiles.length} file(s) >500KB`);
         }
 
-        // Deep nesting check
+
         const deeplyNested = files.filter(f => f.path.split('/').length > 6);
         if (deeplyNested.length > 20) {
             scores.maintainability -= 15;
             issues.maintainability.push('Deep folder nesting detected');
         }
 
-        // Testability scoring
+
         const testFiles = files.filter(f =>
             f.path.includes('test') ||
             f.path.includes('spec') ||
@@ -1876,7 +1867,7 @@
             scores.testability = 85;
         }
 
-        // Documentation scoring
+
         const readme = files.find(f => f.path.toLowerCase() === 'readme.md');
         const contributing = files.find(f => f.path.toLowerCase() === 'contributing.md');
         const changelog = files.find(f => f.path.toLowerCase() === 'changelog.md');
@@ -1906,7 +1897,7 @@
             issues.documentation.push('Limited documentation');
         }
 
-        // Structure scoring
+
         const hasGitignore = files.some(f => f.path === '.gitignore');
         const hasLicense = files.some(f => f.path.toLowerCase().includes('license'));
         const hasConfig = files.some(f =>
@@ -1940,7 +1931,7 @@
             issues.structure.push('No src/ or lib/ folder');
         }
 
-        // Calculate overall score
+
         scores.overall = Math.round(
             (scores.maintainability + scores.testability + scores.documentation + scores.structure) / 4
         );
@@ -2227,26 +2218,26 @@
 
     function buildFileTree(items) {
         const root = { name: '', type: 'folder', children: {}, files: [], path: '' };
-    
+
         items.forEach(item => {
-            // Skip invalid items
+
             if (!item || !item.path) return;
-            
+
             const parts = item.path.split('/');
             let current = root;
-    
+
             parts.forEach((part, index) => {
-                // Skip empty parts
+
                 if (!part) return;
-                
+
                 const isLast = index === parts.length - 1;
-    
+
                 if (isLast && item.type === 'blob') {
-                    // Ensure files array exists
+
                     if (!current.files) {
                         current.files = [];
                     }
-                    
+
                     current.files.push({
                         name: part,
                         path: item.path,
@@ -2254,11 +2245,11 @@
                         type: 'file'
                     });
                 } else {
-                    // Ensure children object exists
+
                     if (!current.children) {
                         current.children = {};
                     }
-                    
+
                     if (!current.children[part]) {
                         current.children[part] = {
                             name: part,
@@ -2272,13 +2263,13 @@
                 }
             });
         });
-    
+
         return root;
     }
 
     function renderTimelineSection(timeline) {
         const gradientId = `timelineGradient-${Math.random().toString(36).substr(2, 9)}`;
-        
+
         if (!timeline || timeline.length === 0) {
             return `
                 <div class="section">
@@ -2291,8 +2282,8 @@
                 </div>
             `;
         }
-        
-        // Handle single data point case
+
+
         if (timeline.length === 1) {
             return `
                 <div class="section">
@@ -2307,24 +2298,24 @@
                 </div>
             `;
         }
-        
+
         const maxCommits = Math.max(...timeline.map(t => t.cumulative));
         const firstLabel = timeline[0].label;
         const lastLabel = timeline[timeline.length - 1].label;
         const timeUnit = timeline[0].unit || 'month';
-        
-        // Calculate point positions with proper percentages
+
+
         const points = timeline.map((point, idx) => {
             const xPercent = 2 + (idx / (timeline.length - 1)) * 96; // 2% to 98%
             const yPercent = 20 + (1 - (point.cumulative / maxCommits)) * 66.67; // 20% to 86.67%
-            return { 
-                xPercent, 
+            return {
+                xPercent,
                 yPercent,
                 label: point.label,
                 commits: point.cumulative
             };
         });
-        
+
         return `
             <div class="section">
                 <h3 class="section-title">Repository Timeline</h3>
@@ -2394,9 +2385,9 @@
                             </div>
                     
                     <div style="display: flex; justify-content: space-between; margin-top: 12px; font-size: 10px; color: #8b949e;">
-                        ${timeline.filter((_, idx) => idx % Math.ceil(timeline.length / 4) === 0).map(t => 
-                            `<div>${t.label}</div>`
-                        ).join('')}
+                        ${timeline.filter((_, idx) => idx % Math.ceil(timeline.length / 4) === 0).map(t =>
+            `<div>${t.label}</div>`
+        ).join('')}
                     </div>
                 </div>
                 
@@ -2568,7 +2559,7 @@
     async function renderSidebar(sidebar, owner, repo, data) {
         const mainContent = sidebar.querySelector('#sidebar-main-content');
         const steps = generateOnboardingSteps(data);
-    
+
         mainContent.innerHTML = `
             ${renderOverviewTab(data, steps)}
             ${renderTreeTab()}
@@ -2583,18 +2574,18 @@
             ${renderToolsTab(owner, repo)}
             ${renderAboutTab()}
         `;
-    
+
         setupTabSwitching(sidebar);
         setupEventHandlers(mainContent, owner, repo, data);
-    
-        // Initial update
+
+
         updateRateLimitDisplay();
-    
+
         if (rateLimitInterval) {
             clearInterval(rateLimitInterval);
             rateLimitInterval = null;
         }
-    
+
         const headers = await getAuthHeaders();
         const rateLimitRes = await fetch(`${GITHUB_API}/rate_limit`, { headers }).catch(() => null);
         if (rateLimitRes && rateLimitRes.ok) {
@@ -2603,14 +2594,38 @@
                 rateLimitInterval = setInterval(updateRateLimitDisplay, 560000);
             }
         }
-    }  
+    }
 
     function setupEventHandlers(container, owner, repo, data) {
         const treeContainer = container.querySelector('#file-tree-container');
         if (treeContainer) {
             treeContainer.innerHTML = renderFileTree(data.fileTree, owner, repo);
         }
-    
+
+
+        const starBtn = container.querySelector('#about-star-btn');
+        const issuesBtn = container.querySelector('#about-issues-btn');
+
+        if (starBtn) {
+            starBtn.addEventListener('click', () => {
+                window.open('https://github.com/SELESTER11/GitNav', '_blank');
+            });
+        }
+
+        if (issuesBtn) {
+            issuesBtn.addEventListener('click', () => {
+                window.open('https://github.com/SELESTER11/GitNav/issues', '_blank');
+            });
+        }
+
+
+        container.querySelectorAll('.onboarding-step[data-onboarding-file]').forEach(step => {
+            const filePath = step.getAttribute('data-onboarding-file');
+            step.addEventListener('click', () => {
+                window.open(`https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${filePath}`, '_blank');
+            });
+        });
+
         setupFileClickHandlers(container, owner, repo);
         setupTreeToggleHandlers(container);
         setupSearchFunctionality(container, data, owner, repo);
@@ -2623,8 +2638,8 @@
         setupExpandableList(container, 'bundle-files');
         setupExpandableList(container, 'secrets');
         setupExpandableList(container, 'security-issues');
-        
-        // Re-add bookmark icons when switching tabs
+
+
         setupTabSwitching(container.closest('#codebase-navigator-sidebar'), owner, repo);
     }
 
@@ -2647,27 +2662,83 @@
                             </div>
                         `;
                     } else {
+                        const visibleCount = 3;
+                        const visibleFiles = deleted.slice(0, visibleCount);
+                        const hiddenFiles = deleted.slice(visibleCount);
+
                         deletedContainer.innerHTML = `
                             <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">
                                 Found ${deleted.length} deleted file(s) in recent history
                             </div>
-                            ${deleted.map(file => `
-                                <div style="background: rgba(218, 54, 51, 0.1); border: 1px solid rgba(218, 54, 51, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
-                                    <div style="font-size: 12px; color: #da3633; font-family: monospace; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                                        ${file.path}
+                            
+                            <div id="visible-deleted-files">
+                                ${visibleFiles.map(file => `
+                                    <div style="background: rgba(218, 54, 51, 0.1); border: 1px solid rgba(218, 54, 51, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                        <div style="font-size: 12px; color: #da3633; font-family: monospace; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                            ${file.path}
+                                        </div>
+                                        <div style="font-size: 11px; color: #8b949e; margin-bottom: 4px;">
+                                            Deleted by ${file.deletedBy} on ${new Date(file.deletedAt).toLocaleDateString()}
+                                        </div>
+                                        <div style="font-size: 11px; color: #8b949e; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                            ${file.commitMessage}
+                                        </div>
+                                        <a href="${file.commitUrl}" target="_blank" style="font-size: 11px; color: #58a6ff; text-decoration: none;">
+                                            View commit
+                                        </a>
                                     </div>
-                                    <div style="font-size: 11px; color: #8b949e; margin-bottom: 4px;">
-                                        Deleted by ${file.deletedBy} on ${new Date(file.deletedAt).toLocaleDateString()}
-                                    </div>
-                                    <div style="font-size: 11px; color: #8b949e; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                                        ${file.commitMessage}
-                                    </div>
-                                    <a href="${file.commitUrl}" target="_blank" style="font-size: 11px; color: #58a6ff; text-decoration: none;">
-                                        View commit
-                                    </a>
+                                `).join('')}
+                            </div>
+                            
+                            ${hiddenFiles.length > 0 ? `
+                                <div id="hidden-deleted-files" style="display: none;">
+                                    ${hiddenFiles.map(file => `
+                                        <div style="background: rgba(218, 54, 51, 0.1); border: 1px solid rgba(218, 54, 51, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                            <div style="font-size: 12px; color: #da3633; font-family: monospace; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                ${file.path}
+                                            </div>
+                                            <div style="font-size: 11px; color: #8b949e; margin-bottom: 4px;">
+                                                Deleted by ${file.deletedBy} on ${new Date(file.deletedAt).toLocaleDateString()}
+                                            </div>
+                                            <div style="font-size: 11px; color: #8b949e; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                ${file.commitMessage}
+                                            </div>
+                                            <a href="${file.commitUrl}" target="_blank" style="font-size: 11px; color: #58a6ff; text-decoration: none;">
+                                                View commit
+                                            </a>
+                                        </div>
+                                    `).join('')}
                                 </div>
-                            `).join('')}
+                                
+                                <button class="btn-secondary" id="toggle-deleted-files" style="width: 100%; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                                    <span class="btn-text">Show ${hiddenFiles.length} More</span>
+                                    <span class="arrow-icon" style="transition: transform 0.2s;">▼</span>
+                                </button>
+                            ` : ''}
                         `;
+
+
+                        const toggleDeletedBtn = deletedContainer.querySelector('#toggle-deleted-files');
+                        const hiddenDeletedSection = deletedContainer.querySelector('#hidden-deleted-files');
+
+                        if (toggleDeletedBtn && hiddenDeletedSection) {
+                            let isExpanded = false;
+                            toggleDeletedBtn.addEventListener('click', () => {
+                                isExpanded = !isExpanded;
+                                const arrow = toggleDeletedBtn.querySelector('.arrow-icon');
+                                const text = toggleDeletedBtn.querySelector('.btn-text');
+
+                                if (isExpanded) {
+                                    hiddenDeletedSection.style.display = 'block';
+                                    text.textContent = 'Show Less';
+                                    if (arrow) arrow.style.transform = 'rotate(180deg)';
+                                } else {
+                                    hiddenDeletedSection.style.display = 'none';
+                                    text.textContent = `Show ${hiddenFiles.length} More`;
+                                    if (arrow) arrow.style.transform = 'rotate(0deg)';
+                                }
+                            });
+                        }
                     }
 
                     deletedContainer.style.display = 'block';
@@ -2681,7 +2752,7 @@
         }
     }
 
-    // Individual tab renderers
+
     function renderOverviewTab(data, steps) {
         return `
             <div class="tab-content active" id="tab-overview">
@@ -2699,8 +2770,8 @@
             <div class="section">
                 <h3 class="section-title">Start Here</h3>
                 <ol class="onboarding-steps">
-                    ${steps.map(step => `
-                        <li class="onboarding-step">
+                    ${steps.map((step, index) => `
+                        <li class="onboarding-step" ${step.file && !step.file.includes('Check') && !step.file.includes('Start') ? `data-onboarding-file="${step.file}" style="cursor: pointer;"` : ''}>
                             <div class="step-title">${step.title}</div>
                             ${step.file ? `<div class="step-file">${step.file}</div>` : ''}
                             ${step.command ? `<div class="step-command">${step.command}</div>` : ''}
@@ -2958,14 +3029,14 @@
     function getHealthTips(data) {
         const tips = [];
 
-        // Check for large files
+
         if (data.stats.largFiles && data.stats.largFiles.length > 10) {
             tips.push('Split large files into smaller modules');
         } else if (data.stats.largFiles && data.stats.largFiles.length > 5) {
             tips.push('Consider refactoring some large files');
         }
 
-        // Check for tests
+
         const hasTests = data.files.some(f =>
             f.path.includes('test') ||
             f.path.includes('spec') ||
@@ -2975,24 +3046,24 @@
             tips.push('Add test coverage to improve reliability');
         }
 
-        // Check for README
+
         const hasReadme = data.files.some(f => f.path.toLowerCase() === 'readme.md');
         if (!hasReadme) {
             tips.push('Add a README.md with project documentation');
         }
 
-        // Check for license
+
         const hasLicense = data.files.some(f => f.path.toLowerCase().includes('license'));
         if (!hasLicense) {
             tips.push('Add a LICENSE file for legal clarity');
         }
 
-        // Check for too many files
+
         if (data.files.length > 1000) {
             tips.push('Consider archiving or removing unused files');
         }
 
-        // Check for .gitignore
+
         const hasGitignore = data.files.some(f => f.path === '.gitignore');
         if (!hasGitignore) {
             tips.push('Add .gitignore to exclude unnecessary files');
@@ -3196,7 +3267,7 @@
     function renderMetricsTab(data) {
         const performanceMetrics = calculatePerformanceMetrics(data.files, data.dependencies);
         const timeline = analyzeRepositoryGrowth(data.commits);
-        
+
         return `
             <div class="tab-content" id="tab-metrics">
                 ${renderCodeMetricsCards(data.metrics)}
@@ -3323,7 +3394,7 @@
             </div>
         `;
     }
-    
+
 
 
     function renderCodeMetricsCards(metrics) {
@@ -3632,15 +3703,15 @@
         `;
     }
 
-    // REPLACE renderSecurityTab function with this updated version
 
-function renderSecurityTab(data) {
-    const secrets = detectSecretPatterns(data.files);
-    const vulnerabilities = analyzeVulnerabilities(data.dependencies, data.files);
-    const insecurePractices = checkInsecurePractices(data.files);
-    const allIssues = [...data.security, ...insecurePractices];
 
-    return `
+    function renderSecurityTab(data) {
+        const secrets = detectSecretPatterns(data.files);
+        const vulnerabilities = analyzeVulnerabilities(data.dependencies, data.files);
+        const insecurePractices = checkInsecurePractices(data.files);
+        const allIssues = [...data.security, ...insecurePractices];
+
+        return `
         <div class="tab-content" id="tab-security">
             <div class="section">
                 <h3 class="section-title">Security Overview</h3>
@@ -3812,7 +3883,7 @@ function renderSecurityTab(data) {
             ${renderSecurityRecommendations()}
         </div>
     `;
-}
+    }
 
     function renderSecurityChecklist(files) {
         const checks = [
@@ -4234,11 +4305,10 @@ function renderSecurityTab(data) {
             <div class="section">
                 <h3 class="section-title">Support & Contribute</h3>
                 <div style="display: grid; gap: 10px;">
-                    <button class="btn-primary" onclick="window.open('https://github.com/SELESTER11/GitNav', '_blank')">
+                    <button class="btn-primary" id="about-star-btn" style="width: 100%; margin-bottom: 8px;">
                         Star on GitHub
                     </button>
-                    <button class="btn-secondary" onclick="window.open('https://github.com/SELESTER11/GitNav/issues', '_blank')" 
-                            style="width: 100%; margin: 0;">
+                    <button class="btn-secondary" id="about-issues-btn" style="width: 100%; margin: 0;">
                         Report an Issue
                     </button>
                 </div>
@@ -4561,20 +4631,20 @@ function renderSecurityTab(data) {
                 setTimeout(() => requestAnimationFrame(draw), 500);
                 return;
             }
-        
+
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.clearRect(0, 0, width, height);
             ctx.translate(translateX * scale, translateY * scale);
             ctx.scale(scale, scale);
-        
+
             links.forEach(link => {
                 const source = link.source;
                 const target = link.target;
-        
+
                 const gradient = ctx.createLinearGradient(source.x, source.y, target.x, target.y);
                 gradient.addColorStop(0, source.color + '40');
                 gradient.addColorStop(1, target.color + '40');
-        
+
                 ctx.strokeStyle = gradient;
                 ctx.lineWidth = 1.5 / scale;
                 ctx.beginPath();
@@ -4582,7 +4652,7 @@ function renderSecurityTab(data) {
                 ctx.lineTo(target.x, target.y);
                 ctx.stroke();
             });
-        
+
             nodes.forEach(node => {
                 if (node === hoverNode) {
                     ctx.shadowBlur = 15;
@@ -4590,12 +4660,12 @@ function renderSecurityTab(data) {
                 } else {
                     ctx.shadowBlur = 0;
                 }
-        
+
                 ctx.fillStyle = node.color;
                 ctx.beginPath();
                 ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
                 ctx.fill();
-        
+
                 if (node === hoverNode) {
                     ctx.strokeStyle = '#ffffff';
                     ctx.lineWidth = 2 / scale;
@@ -4605,33 +4675,33 @@ function renderSecurityTab(data) {
                     ctx.lineWidth = 1 / scale;
                     ctx.stroke();
                 }
-        
+
                 ctx.shadowBlur = 0;
-        
+
                 if (node.r > 10 || node === hoverNode || node.type !== 'file') {
                     ctx.fillStyle = '#ffffff';
                     ctx.font = `${Math.max(9, node.r)}px -apple-system, sans-serif`;
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'top';
-        
+
                     const maxLength = node.type === 'file' ? 12 : 18;
                     const displayName = node.name.length > maxLength
                         ? node.name.substring(0, maxLength - 1) + '…'
                         : node.name;
-        
+
                     const textWidth = ctx.measureText(displayName).width;
                     ctx.fillStyle = 'rgba(13, 17, 23, 0.9)';
                     ctx.fillRect(node.x - textWidth / 2 - 3, node.y + node.r + 3, textWidth + 6, 14);
-        
+
                     ctx.fillStyle = '#ffffff';
                     ctx.fillText(displayName, node.x, node.y + node.r + 5);
                 }
             });
-        
+
             simulate();
             animationFrameId = requestAnimationFrame(draw);
         }
-        
+
 
         function worldToScreen(x, y) {
             return {
@@ -4762,17 +4832,17 @@ function renderSecurityTab(data) {
     function setupExpandableList(container, listId, visibleCount = 3) {
         const toggleBtn = container.querySelector(`#toggle-${listId}`);
         const hiddenSection = container.querySelector(`#hidden-${listId}`);
-        
+
         if (!toggleBtn || !hiddenSection) return;
-        
+
         let isExpanded = false;
-        
+
         toggleBtn.addEventListener('click', () => {
             isExpanded = !isExpanded;
-            
+
             const arrow = toggleBtn.querySelector('.arrow-icon');
             const text = toggleBtn.querySelector('.btn-text');
-            
+
             if (isExpanded) {
                 hiddenSection.style.display = 'block';
                 text.textContent = 'Show Less';
@@ -4855,30 +4925,30 @@ function renderSecurityTab(data) {
     function setupFileClickHandlers(container, owner, repo) {
         container.querySelectorAll('[data-path]').forEach(el => {
             const path = el.getAttribute('data-path');
-    
+
             el.addEventListener('click', async (e) => {
-                // Don't open GitHub if clicking on buttons or links inside
+
                 if (e.target.closest('button') || e.target.closest('a')) {
                     return;
                 }
-    
-                // Check if related files already showing
+
+
                 const existing = el.querySelector('.file-recommendations');
                 if (existing) {
                     existing.remove();
                     return;
                 }
-    
-                // If it's a simple click without showing related files, open on GitHub
-                // Check if this is a tree-item (from tree tab) or regular file-item
+
+
+
                 const isTreeItem = el.classList.contains('tree-item');
                 const isFileItem = el.classList.contains('file-item');
-    
-                // For tree items, show related files
-                // For file items in other tabs, also show related files
+
+
+
                 if (isTreeItem || isFileItem) {
                     const related = findRelatedFilesByStructure(path, globalData.files);
-    
+
                     const recsDiv = document.createElement('div');
                     recsDiv.className = 'file-recommendations';
                     recsDiv.style.cssText = `
@@ -4891,9 +4961,9 @@ function renderSecurityTab(data) {
                         box-sizing: border-box;
                         flex-basis: 100%;
                     `;
-    
+
                     let content = '';
-    
+
                     if (related.length > 0) {
                         content += `
                             <div style="font-size: 11px; font-weight: 600; color: #58a6ff; margin-bottom: 8px;">
@@ -4907,7 +4977,7 @@ function renderSecurityTab(data) {
                             `).join('')}
                         `;
                     }
-    
+
                     content += `
                         <button class="btn-secondary open-github-btn" style="width: 100%; margin-top: 8px; font-size: 11px; padding: 6px;">
                             Open on GitHub
@@ -4917,18 +4987,18 @@ function renderSecurityTab(data) {
                         </button>
                         <div class="history-container" style="display: none; margin-top: 8px;"></div>
                     `;
-    
+
                     recsDiv.innerHTML = content;
                     el.appendChild(recsDiv);
-    
-                    // Setup open on GitHub button - FIXED: Use globalDefaultBranch
+
+
                     const openGithubBtn = recsDiv.querySelector('.open-github-btn');
                     openGithubBtn.addEventListener('click', (e) => {
                         e.stopPropagation();
                         window.open(`https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${path}`, '_blank');
                     });
-    
-                    // Setup related file clicks - FIXED: Use globalDefaultBranch
+
+
                     recsDiv.querySelectorAll('.related-file-link').forEach(link => {
                         link.addEventListener('click', (e) => {
                             e.stopPropagation();
@@ -4936,20 +5006,20 @@ function renderSecurityTab(data) {
                             window.open(`https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${relatedPath}`, '_blank');
                         });
                     });
-    
-                    // Setup history button
+
+
                     const historyBtn = recsDiv.querySelector('.view-history-btn');
                     const historyContainer = recsDiv.querySelector('.history-container');
-    
+
                     historyBtn.addEventListener('click', async (e) => {
                         e.stopPropagation();
-    
+
                         if (historyContainer.style.display === 'none') {
                             historyBtn.textContent = 'Loading...';
                             historyBtn.disabled = true;
-    
+
                             const evolution = await analyzeFileEvolution(owner, repo, path);
-    
+
                             if (evolution.length === 0) {
                                 historyContainer.innerHTML = `
                                     <div style="font-size: 11px; color: #8b949e; text-align: center; padding: 8px;">
@@ -4962,7 +5032,7 @@ function renderSecurityTab(data) {
                                         Recent Changes (${evolution.length})
                                     </div>
                                     ${evolution.slice(0, 5).map(commit => {
-                                        return `
+                                    return `
                                             <div class="commit-link" data-url="${commit.url}" style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 6px; margin-bottom: 4px; cursor: pointer;">
                                                 <div style="font-size: 11px; color: #c9d1d9; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                                                     ${commit.message}
@@ -4972,10 +5042,10 @@ function renderSecurityTab(data) {
                                                 </div>
                                             </div>
                                         `;
-                                    }).join('')}
+                                }).join('')}
                                 `;
-                                
-                                // Setup commit clicks
+
+
                                 historyContainer.querySelectorAll('.commit-link').forEach(commitLink => {
                                     commitLink.addEventListener('click', (e) => {
                                         e.stopPropagation();
@@ -4983,7 +5053,7 @@ function renderSecurityTab(data) {
                                     });
                                 });
                             }
-    
+
                             historyContainer.style.display = 'block';
                             historyBtn.textContent = 'Hide History';
                             historyBtn.disabled = false;
@@ -4992,7 +5062,7 @@ function renderSecurityTab(data) {
                             historyBtn.textContent = 'View File History';
                         }
                     });
-    
+
                     e.stopPropagation();
                 }
             });
@@ -5016,213 +5086,213 @@ function renderSecurityTab(data) {
         });
     }
 
-    // REPLACE the setupSearchFunctionality function with this fixed version:
 
-function setupSearchFunctionality(container, data, owner, repo) {
-    const activateBtn = container.querySelector('#activate-search-btn');
-    const searchInputContainer = container.querySelector('#search-input-container');
-    const searchResults = container.querySelector('#search-results');
-    const filterBtns = container.querySelectorAll('.search-filter-btn');
-    const typeFilter = container.querySelector('#file-type-filter');
-    const sizeFilter = container.querySelector('#file-size-filter');
 
-    if (!searchResults || !activateBtn) return;
+    function setupSearchFunctionality(container, data, owner, repo) {
+        const activateBtn = container.querySelector('#activate-search-btn');
+        const searchInputContainer = container.querySelector('#search-input-container');
+        const searchResults = container.querySelector('#search-results');
+        const filterBtns = container.querySelectorAll('.search-filter-btn');
+        const typeFilter = container.querySelector('#file-type-filter');
+        const sizeFilter = container.querySelector('#file-size-filter');
 
-    // Populate file type filter
-    const extensions = [...new Set(data.files
-        .map(f => f.path.split('.').pop().toLowerCase())
-        .filter(ext => ext && ext.length < 10)
-    )].sort();
+        if (!searchResults || !activateBtn) return;
 
-    if (typeFilter) {
-        extensions.forEach(ext => {
-            const option = document.createElement('option');
-            option.value = ext;
-            option.textContent = `.${ext}`;
-            typeFilter.appendChild(option);
-        });
-    }
 
-    let currentFilter = 'all';
-    let currentTypeFilter = '';
-    let currentSizeFilter = '';
-    let searchActivated = false;
-    let userHasTyped = false;
-    let activeInput = null;
+        const extensions = [...new Set(data.files
+            .map(f => f.path.split('.').pop().toLowerCase())
+            .filter(ext => ext && ext.length < 10)
+        )].sort();
 
-    // Only show input when button is clicked
-    activateBtn.addEventListener('click', () => {
-        searchActivated = true;
-        userHasTyped = false;
-        activateBtn.style.display = 'none';
-        searchInputContainer.style.display = 'block';
-        
-        // CRITICAL FIX: Create input with maximum autofill prevention
-        const newInput = document.createElement('input');
-        newInput.type = 'text';
-        newInput.className = 'search-input';
-        newInput.id = 'search-' + Math.random().toString(36).substr(2, 9); // Random unique ID
-        newInput.name = 'search-' + Date.now(); // Random unique name
-        
-        // NUCLEAR OPTION: All possible autofill prevention attributes
-        newInput.setAttribute('autocomplete', 'off');
-        newInput.setAttribute('autocorrect', 'off');
-        newInput.setAttribute('autocapitalize', 'off');
-        newInput.setAttribute('spellcheck', 'false');
-        newInput.setAttribute('data-form-type', 'other'); // Tells browser this isn't a form
-        newInput.setAttribute('data-lpignore', 'true'); // LastPass ignore
-        newInput.setAttribute('data-1p-ignore', 'true'); // 1Password ignore
-        newInput.setAttribute('aria-autocomplete', 'none');
-        newInput.placeholder = 'Type to search files...';
-        newInput.value = '';
-        newInput.readOnly = true; // Start as readonly
-        
-        // Clear container and add new input
-        searchInputContainer.innerHTML = '';
-        searchInputContainer.appendChild(newInput);
-        
-        activeInput = newInput;
-        
-        // AGGRESSIVE CLEAR: Monitor for autofill every 10ms for 2 seconds
-        let clearAttempts = 0;
-        const maxAttempts = 200; // 2 seconds worth
-        const aggressiveClear = setInterval(() => {
-            // If input has value but user hasn't typed, clear it
-            if (!userHasTyped && newInput.value) {
-                newInput.value = '';
-            }
-            
-            clearAttempts++;
-            if (clearAttempts >= maxAttempts) {
-                clearInterval(aggressiveClear);
-            }
-        }, 10);
-        
-        // DELAYED ACTIVATION: Make input functional after 500ms
-        setTimeout(() => {
-            newInput.readOnly = false;
-            
-            // Track REAL user typing (not autofill)
-            newInput.addEventListener('keydown', (e) => {
-                // Only count actual keyboard input
-                if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
-                    userHasTyped = true;
-                }
+        if (typeFilter) {
+            extensions.forEach(ext => {
+                const option = document.createElement('option');
+                option.value = ext;
+                option.textContent = `.${ext}`;
+                typeFilter.appendChild(option);
             });
-            
-            // Only process input if user has actually typed
-            newInput.addEventListener('input', (e) => {
-                // REJECT autofill values
-                if (!userHasTyped) {
-                    newInput.value = '';
-                    return;
-                }
-                
-                // Extra safety: Reject email-like patterns
-                const value = newInput.value;
-                if (value.includes('@') && value.includes('.') && value.split('@').length === 2) {
-                    newInput.value = '';
-                    return;
-                }
-                
-                performSearch(newInput.value.trim());
-            });
-            
-            // Clear on focus if autofilled
-            newInput.addEventListener('focus', () => {
+        }
+
+        let currentFilter = 'all';
+        let currentTypeFilter = '';
+        let currentSizeFilter = '';
+        let searchActivated = false;
+        let userHasTyped = false;
+        let activeInput = null;
+
+
+        activateBtn.addEventListener('click', () => {
+            searchActivated = true;
+            userHasTyped = false;
+            activateBtn.style.display = 'none';
+            searchInputContainer.style.display = 'block';
+
+
+            const newInput = document.createElement('input');
+            newInput.type = 'text';
+            newInput.className = 'search-input';
+            newInput.id = 'search-' + Math.random().toString(36).substr(2, 9); // Random unique ID
+            newInput.name = 'search-' + Date.now(); // Random unique name
+
+
+            newInput.setAttribute('autocomplete', 'off');
+            newInput.setAttribute('autocorrect', 'off');
+            newInput.setAttribute('autocapitalize', 'off');
+            newInput.setAttribute('spellcheck', 'false');
+            newInput.setAttribute('data-form-type', 'other'); // Tells browser this isn't a form
+            newInput.setAttribute('data-lpignore', 'true'); // LastPass ignore
+            newInput.setAttribute('data-1p-ignore', 'true'); // 1Password ignore
+            newInput.setAttribute('aria-autocomplete', 'none');
+            newInput.placeholder = 'Type to search files...';
+            newInput.value = '';
+            newInput.readOnly = true; // Start as readonly
+
+
+            searchInputContainer.innerHTML = '';
+            searchInputContainer.appendChild(newInput);
+
+            activeInput = newInput;
+
+
+            let clearAttempts = 0;
+            const maxAttempts = 200; // 2 seconds worth
+            const aggressiveClear = setInterval(() => {
+
                 if (!userHasTyped && newInput.value) {
                     newInput.value = '';
                 }
-            });
-            
-            // Clear on click
-            newInput.addEventListener('click', () => {
-                if (!userHasTyped && newInput.value) {
-                    newInput.value = '';
+
+                clearAttempts++;
+                if (clearAttempts >= maxAttempts) {
+                    clearInterval(aggressiveClear);
+                }
+            }, 10);
+
+
+            setTimeout(() => {
+                newInput.readOnly = false;
+
+
+                newInput.addEventListener('keydown', (e) => {
+
+                    if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
+                        userHasTyped = true;
+                    }
+                });
+
+
+                newInput.addEventListener('input', (e) => {
+
+                    if (!userHasTyped) {
+                        newInput.value = '';
+                        return;
+                    }
+
+
+                    const value = newInput.value;
+                    if (value.includes('@') && value.includes('.') && value.split('@').length === 2) {
+                        newInput.value = '';
+                        return;
+                    }
+
+                    performSearch(newInput.value.trim());
+                });
+
+
+                newInput.addEventListener('focus', () => {
+                    if (!userHasTyped && newInput.value) {
+                        newInput.value = '';
+                    }
+                });
+
+
+                newInput.addEventListener('click', () => {
+                    if (!userHasTyped && newInput.value) {
+                        newInput.value = '';
+                    }
+                });
+
+
+                newInput.focus();
+
+            }, 500); // 500ms delay before input becomes functional
+
+
+            const observer = new MutationObserver(() => {
+                if (!userHasTyped && activeInput && activeInput.value) {
+                    activeInput.value = '';
                 }
             });
-            
-            // Focus the input
-            newInput.focus();
-            
-        }, 500); // 500ms delay before input becomes functional
-        
-        // EXTRA SAFETY: Monitor for value changes without user input
-        const observer = new MutationObserver(() => {
-            if (!userHasTyped && activeInput && activeInput.value) {
-                activeInput.value = '';
-            }
-        });
-        
-        observer.observe(newInput, {
-            attributes: true,
-            attributeFilter: ['value']
-        });
-        
-        // Cleanup observer after 3 seconds
-        setTimeout(() => observer.disconnect(), 3000);
-    });
 
-    function performSearch(query) {
-        // Never search without user typing
-        if (!searchActivated || !userHasTyped) {
-            searchResults.innerHTML = '';
-            return;
-        }
-        
-        // Reject email-like queries
-        if (query.includes('@') && !query.includes('/')) {
-            searchResults.innerHTML = '';
-            if (activeInput) activeInput.value = '';
-            return;
-        }
-    
-        let filteredFiles = data.files;
-    
-        if (currentFilter !== 'all') {
-            filteredFiles = data.categorized[currentFilter] || [];
-        }
-    
-        if (currentTypeFilter) {
-            filteredFiles = filteredFiles.filter(f =>
-                f.path.toLowerCase().endsWith(`.${currentTypeFilter}`)
-            );
-        }
-    
-        if (currentSizeFilter) {
-            filteredFiles = filteredFiles.filter(f => {
-                const size = f.size || 0;
-                if (currentSizeFilter === 'small') return size < 10240;
-                if (currentSizeFilter === 'medium') return size >= 10240 && size <= 102400;
-                if (currentSizeFilter === 'large') return size > 102400;
-                return true;
+            observer.observe(newInput, {
+                attributes: true,
+                attributeFilter: ['value']
             });
-        }
-    
-        let matches = filteredFiles;
-        if (query) {
-            matches = filteredFiles
-                .map(file => ({
-                    file,
-                    score: fuzzyMatch(file.path, query)
-                }))
-                .filter(item => item.score > 0)
-                .sort((a, b) => b.score - a.score)
-                .map(item => item.file)
-                .slice(0, 30);
-        } else {
-            matches = matches.slice(0, 30);
-        }
-    
-        if (matches.length === 0) {
-            searchResults.innerHTML = `
+
+
+            setTimeout(() => observer.disconnect(), 3000);
+        });
+
+        function performSearch(query) {
+
+            if (!searchActivated || !userHasTyped) {
+                searchResults.innerHTML = '';
+                return;
+            }
+
+
+            if (query.includes('@') && !query.includes('/')) {
+                searchResults.innerHTML = '';
+                if (activeInput) activeInput.value = '';
+                return;
+            }
+
+            let filteredFiles = data.files;
+
+            if (currentFilter !== 'all') {
+                filteredFiles = data.categorized[currentFilter] || [];
+            }
+
+            if (currentTypeFilter) {
+                filteredFiles = filteredFiles.filter(f =>
+                    f.path.toLowerCase().endsWith(`.${currentTypeFilter}`)
+                );
+            }
+
+            if (currentSizeFilter) {
+                filteredFiles = filteredFiles.filter(f => {
+                    const size = f.size || 0;
+                    if (currentSizeFilter === 'small') return size < 10240;
+                    if (currentSizeFilter === 'medium') return size >= 10240 && size <= 102400;
+                    if (currentSizeFilter === 'large') return size > 102400;
+                    return true;
+                });
+            }
+
+            let matches = filteredFiles;
+            if (query) {
+                matches = filteredFiles
+                    .map(file => ({
+                        file,
+                        score: fuzzyMatch(file.path, query)
+                    }))
+                    .filter(item => item.score > 0)
+                    .sort((a, b) => b.score - a.score)
+                    .map(item => item.file)
+                    .slice(0, 30);
+            } else {
+                matches = matches.slice(0, 30);
+            }
+
+            if (matches.length === 0) {
+                searchResults.innerHTML = `
                 <div style="color: #8b949e; font-size: 13px; padding: 12px 0; text-align: center;">
                     No files found ${query ? `matching "${query}"` : ''}
                 </div>`;
-            return;
-        }
-    
-        searchResults.innerHTML = `
+                return;
+            }
+
+            searchResults.innerHTML = `
             <div style="color: #8b949e; font-size: 12px; margin-bottom: 12px;">
                 Found ${matches.length} file${matches.length !== 1 ? 's' : ''}
             </div>
@@ -5234,80 +5304,80 @@ function setupSearchFunctionality(container, data, owner, repo) {
                 </div>
             `).join('')}
         `;
-    
-        searchResults.querySelectorAll('.file-item[data-path]').forEach(el => {
-            const path = el.getAttribute('data-path');
-            el.style.cursor = 'pointer';
-    
-            el.addEventListener('click', (e) => {
-                const existing = el.querySelector('.file-recommendations');
-                if (existing) {
-                    existing.remove();
-                    return;
-                }
-    
-                const recsDiv = document.createElement('div');
-                recsDiv.className = 'file-recommendations';
-                recsDiv.style.cssText = `
+
+            searchResults.querySelectorAll('.file-item[data-path]').forEach(el => {
+                const path = el.getAttribute('data-path');
+                el.style.cursor = 'pointer';
+
+                el.addEventListener('click', (e) => {
+                    const existing = el.querySelector('.file-recommendations');
+                    if (existing) {
+                        existing.remove();
+                        return;
+                    }
+
+                    const recsDiv = document.createElement('div');
+                    recsDiv.className = 'file-recommendations';
+                    recsDiv.style.cssText = `
                     margin-top: 10px;
                     padding: 10px;
                     background: rgba(88, 166, 255, 0.05);
                     border: 1px solid rgba(88, 166, 255, 0.2);
                     border-radius: 6px;
                 `;
-    
-                recsDiv.innerHTML = `
+
+                    recsDiv.innerHTML = `
                     <button class="btn-secondary open-github-btn"
                         style="width:100%; font-size:11px; padding:6px;">
                         Open on GitHub
                     </button>
                 `;
-    
-                el.appendChild(recsDiv);
-    
-                recsDiv.querySelector('.open-github-btn')
-                    .addEventListener('click', (ev) => {
-                        ev.stopPropagation();
-                        window.open(
-                            `https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${path}`,
-                            '_blank'
-                        );
-                    });
-    
-                e.stopPropagation();
+
+                    el.appendChild(recsDiv);
+
+                    recsDiv.querySelector('.open-github-btn')
+                        .addEventListener('click', (ev) => {
+                            ev.stopPropagation();
+                            window.open(
+                                `https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${path}`,
+                                '_blank'
+                            );
+                        });
+
+                    e.stopPropagation();
+                });
+            });
+        }
+
+        filterBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                filterBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentFilter = btn.dataset.filter;
+                if (searchActivated && userHasTyped && activeInput) {
+                    performSearch(activeInput.value.trim());
+                }
             });
         });
-    }
 
-    filterBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            filterBtns.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            currentFilter = btn.dataset.filter;
-            if (searchActivated && userHasTyped && activeInput) {
-                performSearch(activeInput.value.trim());
-            }
-        });
-    });
+        if (typeFilter) {
+            typeFilter.addEventListener('change', (e) => {
+                currentTypeFilter = e.target.value;
+                if (searchActivated && userHasTyped && activeInput) {
+                    performSearch(activeInput.value.trim());
+                }
+            });
+        }
 
-    if (typeFilter) {
-        typeFilter.addEventListener('change', (e) => {
-            currentTypeFilter = e.target.value;
-            if (searchActivated && userHasTyped && activeInput) {
-                performSearch(activeInput.value.trim());
-            }
-        });
+        if (sizeFilter) {
+            sizeFilter.addEventListener('change', (e) => {
+                currentSizeFilter = e.target.value;
+                if (searchActivated && userHasTyped && activeInput) {
+                    performSearch(activeInput.value.trim());
+                }
+            });
+        }
     }
-
-    if (sizeFilter) {
-        sizeFilter.addEventListener('change', (e) => {
-            currentSizeFilter = e.target.value;
-            if (searchActivated && userHasTyped && activeInput) {
-                performSearch(activeInput.value.trim());
-            }
-        });
-    }
-}
 
     function setupCloneTools(container, owner, repo) {
         const cloneUrl = container.querySelector('#clone-url');
@@ -5361,7 +5431,7 @@ function setupSearchFunctionality(container, data, owner, repo) {
                 copyToClipboard(btn.dataset.copy, btn);
             });
         });
-        
+
     }
 
     function setupExportTools(container, data, owner, repo) {
@@ -5455,14 +5525,14 @@ function setupSearchFunctionality(container, data, owner, repo) {
 
 
     function setupVisualizationToggle(container, data, owner, repo) {
-        // Don't initialize graph immediately - wait for tab click
+
         const visualizeTab = document.querySelector('[data-tab="visualize"]');
         let graphInitialized = false;
 
         if (visualizeTab) {
             visualizeTab.addEventListener('click', () => {
                 if (!graphInitialized) {
-                    // Only initialize once when user clicks the visualize tab
+
                     setTimeout(() => {
                         initForceGraphVisualization('viz-graph', data.files, owner, repo);
                         graphInitialized = true;
@@ -5494,23 +5564,23 @@ function setupSearchFunctionality(container, data, owner, repo) {
 
     function showError(sidebar, message) {
         const content = sidebar.querySelector('#sidebar-main-content');
-    
+
         const tokenBanner = sidebar.querySelector('#token-setup-banner');
-    
-        // Show token setup banner for these errors
-        if (message.includes('private') || 
-            message.includes('404') || 
+
+
+        if (message.includes('private') ||
+            message.includes('404') ||
             message.includes('not found') ||
             message.includes('rate limit')) {
             if (tokenBanner) {
                 tokenBanner.style.display = 'block';
             }
         }
-    
+
         let errorTitle = 'Error Loading Repository';
         let errorMessage = message;
         let suggestions = [];
-    
+
         if (message.includes('rate limit')) {
             errorTitle = 'GitHub API Rate Limit Exceeded';
             suggestions = [
@@ -5534,7 +5604,7 @@ function setupSearchFunctionality(container, data, owner, repo) {
                 'Check your internet connection'
             ];
         }
-    
+
         content.innerHTML = `
             <div style="padding: 16px;">
                 <div class="error">
