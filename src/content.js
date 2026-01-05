@@ -4,6 +4,29 @@
 
     console.log('GitHub Codebase Navigator: Content script loaded');
 
+    let eventCleanupFunctions = [];
+    function registerCleanup(cleanupFn) {
+        eventCleanupFunctions.push(cleanupFn);
+    }
+    function cleanupAllEventListeners() {
+        eventCleanupFunctions.forEach(fn => {
+            try {
+                fn();
+            } catch (e) {
+                console.error('Cleanup error:', e);
+            }
+        });
+        eventCleanupFunctions = [];
+    }
+
+    function showWarning(message) {
+        const statusDiv = document.getElementById('rate-limit-status');
+        if (statusDiv) {
+            statusDiv.style.color = '#d29922';
+            statusDiv.textContent = message;
+        }
+    }
+
     async function getStoredToken() {
         return new Promise((resolve) => {
             chrome.storage.local.get(['github_token'], (result) => {
@@ -48,12 +71,254 @@
         MAX_KEY_FILES_PREVIEW: 3
     };
 
+    async function fetchCommitHistory(owner, repo, filePath = null) {
+        const headers = await getAuthHeaders();
+        const url = filePath
+            ? `${GITHUB_API}/repos/${owner}/${repo}/commits?path=${filePath}&per_page=100`
+            : `${GITHUB_API}/repos/${owner}/${repo}/commits?per_page=100`;
+
+        try {
+            const response = await fetch(url, { headers });
+            if (!response.ok) return [];
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching commit history:', error);
+            return [];
+        }
+    }
+
+    async function analyzeFileEvolution(owner, repo, filePath) {
+        const commits = await fetchCommitHistory(owner, repo, filePath);
+        const evolution = [];
+
+        for (const commit of commits.slice(0, 20)) {
+            evolution.push({
+                sha: commit.sha,
+                message: commit.commit.message.split('\n')[0],
+                author: commit.commit.author.name,
+                date: commit.commit.author.date,
+                url: commit.html_url
+            });
+        }
+
+        return evolution;
+    }
+
+    async function detectDeletedFiles(owner, repo) {
+        const headers = await getAuthHeaders();
+        const commits = await fetchCommitHistory(owner, repo);
+        const deleted = new Map();
+
+        for (const commit of commits.slice(0, 50)) {
+            try {
+                const detailUrl = `${GITHUB_API}/repos/${owner}/${repo}/commits/${commit.sha}`;
+                const detailResponse = await fetch(detailUrl, { headers });
+                if (!detailResponse.ok) continue;
+
+                const detail = await detailResponse.json();
+                if (detail.files) {
+                    detail.files.forEach(file => {
+                        if (file.status === 'removed') {
+                            if (!deleted.has(file.filename)) {
+                                deleted.set(file.filename, {
+                                    path: file.filename,
+                                    deletedAt: commit.commit.author.date,
+                                    deletedBy: commit.commit.author.name,
+                                    commitMessage: commit.commit.message.split('\n')[0],
+                                    commitUrl: commit.html_url
+                                });
+                            }
+                        }
+                    });
+                }
+            } catch (error) {
+                continue;
+            }
+        }
+
+        return Array.from(deleted.values()).slice(0, 10);
+    }
+
+    function analyzeRepositoryGrowth(commits) {
+        if (!commits || !Array.isArray(commits) || commits.length === 0) {
+            return [];
+        }
+        
+        const validCommits = commits.filter(commit => 
+            commit && commit.commit && commit.commit.author && commit.commit.author.date
+        );
+        
+        if (validCommits.length === 0) {
+            return [];
+        }
+        
+        // Try months first
+        const monthlyData = {};
+        validCommits.forEach(commit => {
+            try {
+                const date = new Date(commit.commit.author.date);
+                const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+                
+                if (!monthlyData[monthKey]) {
+                    monthlyData[monthKey] = {
+                        key: monthKey,
+                        label: monthKey,
+                        commits: 0,
+                        date: date,
+                        unit: 'month'
+                    };
+                }
+                monthlyData[monthKey].commits++;
+            } catch (e) {
+                console.warn('Invalid commit date:', e);
+            }
+        });
+        
+        const monthlyTimeline = Object.values(monthlyData).sort((a, b) => a.date - b.date);
+        
+        // If we have 2+ months of data, use monthly view
+        if (monthlyTimeline.length >= 2) {
+            let totalCommits = 0;
+            const result = monthlyTimeline.map(month => {
+                totalCommits += month.commits;
+                return {
+                    label: month.label,
+                    commits: month.commits,
+                    cumulative: totalCommits,
+                    unit: 'month'
+                };
+            });
+            return result.slice(-12); // Last 12 months
+        }
+        
+        // Try weeks if not enough months
+        const weeklyData = {};
+        validCommits.forEach(commit => {
+            try {
+                const date = new Date(commit.commit.author.date);
+                const weekStart = new Date(date);
+                weekStart.setDate(date.getDate() - date.getDay()); // Start of week
+                const weekKey = weekStart.toISOString().split('T')[0];
+                
+                if (!weeklyData[weekKey]) {
+                    weeklyData[weekKey] = {
+                        key: weekKey,
+                        label: `Week of ${weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
+                        commits: 0,
+                        date: weekStart,
+                        unit: 'week'
+                    };
+                }
+                weeklyData[weekKey].commits++;
+            } catch (e) {
+                console.warn('Invalid commit date:', e);
+            }
+        });
+        
+        const weeklyTimeline = Object.values(weeklyData).sort((a, b) => a.date - b.date);
+        
+        // If we have 2+ weeks of data, use weekly view
+        if (weeklyTimeline.length >= 2) {
+            let totalCommits = 0;
+            const result = weeklyTimeline.map(week => {
+                totalCommits += week.commits;
+                return {
+                    label: week.label,
+                    commits: week.commits,
+                    cumulative: totalCommits,
+                    unit: 'week'
+                };
+            });
+            return result.slice(-12); // Last 12 weeks
+        }
+        
+        // Fall back to daily view for very new repos
+        const dailyData = {};
+        validCommits.forEach(commit => {
+            try {
+                const date = new Date(commit.commit.author.date);
+                const dayKey = date.toISOString().split('T')[0];
+                
+                if (!dailyData[dayKey]) {
+                    dailyData[dayKey] = {
+                        key: dayKey,
+                        label: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+                        commits: 0,
+                        date: date,
+                        unit: 'day'
+                    };
+                }
+                dailyData[dayKey].commits++;
+            } catch (e) {
+                console.warn('Invalid commit date:', e);
+            }
+        });
+        
+        const dailyTimeline = Object.values(dailyData).sort((a, b) => a.date - b.date);
+        
+        if (dailyTimeline.length >= 2) {
+            let totalCommits = 0;
+            const result = dailyTimeline.map(day => {
+                totalCommits += day.commits;
+                return {
+                    label: day.label,
+                    commits: day.commits,
+                    cumulative: totalCommits,
+                    unit: 'day'
+                };
+            });
+            return result.slice(-14); // Last 14 days
+        }
+        
+        // If only 1 day with commits, still show it
+        if (dailyTimeline.length === 1) {
+            return [{
+                label: dailyTimeline[0].label,
+                commits: dailyTimeline[0].commits,
+                cumulative: dailyTimeline[0].commits,
+                unit: 'day'
+            }];
+        }
+        
+        return [];
+    }
+
+    function fuzzyMatch(text, query) {
+        text = text.toLowerCase();
+        query = query.toLowerCase();
+
+        let textIndex = 0;
+        let queryIndex = 0;
+        let score = 0;
+        let consecutiveMatches = 0;
+
+        while (textIndex < text.length && queryIndex < query.length) {
+            if (text[textIndex] === query[queryIndex]) {
+                queryIndex++;
+                consecutiveMatches++;
+                score += consecutiveMatches * 10; // Bonus for consecutive matches
+            } else {
+                consecutiveMatches = 0;
+            }
+            textIndex++;
+        }
+
+        if (queryIndex === query.length) {
+            // All characters matched, bonus for exact prefix match
+            if (text.startsWith(query)) score += 100;
+            return score;
+        }
+
+        return 0; // No match
+    }
+
     const GITHUB_API = 'https://api.github.com';
 
     // State
     let globalData = null;
     let repoCache = {};
     let rateLimitInterval = null;
+    let globalDefaultBranch = 'main';
 
 
     function init() {
@@ -69,59 +334,244 @@
     function injectButton() {
         const existing = document.getElementById('codebase-nav-button');
         if (existing) return;
-
+    
         const container = document.createElement('div');
         container.id = 'codebase-nav-button';
         container.style.cssText = `
-        position: fixed !important;
-        bottom: 30px !important;
-        right: 30px !important;
-        z-index: 999999 !important;
-      `;
-
+            position: fixed !important;
+            bottom: 30px !important;
+            right: 30px !important;
+            z-index: 999999 !important;
+            transition: right 0.3s ease !important;
+        `;
+    
         const button = document.createElement('button');
         button.textContent = 'Analyze Codebase';
         button.style.cssText = `
-        background: #238636 !important;
-        color: #ffffff !important;
-        border: none !important;
-        padding: 14px 28px !important;
-        border-radius: 6px !important;
-        font-size: 14px !important;
-        font-weight: 600 !important;
-        cursor: pointer !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
-      `;
-
-        button.onmouseover = () => button.style.background = '#2ea043 !important';
-        button.onmouseout = () => button.style.background = '#238636 !important';
-        button.onclick = openSidebar;
-
+            background: #238636 !important;
+            color: #ffffff !important;
+            border: none !important;
+            padding: 14px 28px !important;
+            border-radius: 6px !important;
+            font-size: 14px !important;
+            font-weight: 600 !important;
+            cursor: pointer !important;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4), 0 0 0 0 rgba(35, 134, 54, 0.7) !important;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+            transition: background 0.2s, transform 0.2s !important;
+            animation: buttonPulse 2s ease-in-out infinite !important;
+            position: relative !important;
+            overflow: hidden !important;
+        `;
+    
+        // Add keyframe animations to the page
+        if (!document.getElementById('gitnav-button-animations')) {
+            const style = document.createElement('style');
+            style.id = 'gitnav-button-animations';
+            style.textContent = `
+                @keyframes buttonPulse {
+                    0%, 100% {
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.4), 0 0 0 0 rgba(35, 134, 54, 0.7);
+                    }
+                    50% {
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.4), 0 0 0 8px rgba(35, 134, 54, 0);
+                    }
+                }
+                
+                @keyframes shimmer {
+                    0% {
+                        left: -100%;
+                    }
+                    100% {
+                        left: 100%;
+                    }
+                }
+                
+                #codebase-nav-button button::before {
+                    content: '';
+                    position: absolute;
+                    top: 0;
+                    left: -100%;
+                    width: 50%;
+                    height: 100%;
+                    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+                    animation: shimmer 3s ease-in-out infinite;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    
+        button.onmouseover = () => {
+            button.style.background = '#2ea043 !important';
+            button.style.transform = 'scale(1.05) !important';
+            button.style.animation = 'none !important';
+        };
+    
+        button.onmouseout = () => {
+            button.style.background = '#238636 !important';
+            button.style.transform = 'scale(1) !important';
+            button.style.animation = 'buttonPulse 2s ease-in-out infinite !important';
+        };
+    
+        // CRITICAL FIX: Prevent the click from affecting GitHub's page
+        button.onclick = (e) => {
+            // Stop ALL event propagation
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            
+            // NUCLEAR: Temporarily disable ALL input fields on the page
+            const allInputs = document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])');
+            const disabledInputs = [];
+            
+            allInputs.forEach(input => {
+                if (!input.disabled && !input.closest('#codebase-navigator-sidebar')) {
+                    input.disabled = true;
+                    input.style.pointerEvents = 'none';
+                    disabledInputs.push(input);
+                }
+            });
+            
+            // Blur any currently focused element (especially GitHub's search)
+            if (document.activeElement) {
+                document.activeElement.blur();
+            }
+            
+            // Remove focus from the button itself
+            button.blur();
+            
+            // Focus the body to ensure nothing else gets focus
+            document.body.focus();
+            
+            // Call openSidebar and re-enable inputs after
+            setTimeout(() => {
+                openSidebar();
+                
+                // Re-enable inputs after 500ms
+                setTimeout(() => {
+                    disabledInputs.forEach(input => {
+                        input.disabled = false;
+                        input.style.pointerEvents = '';
+                    });
+                }, 500);
+            }, 10);
+        };
+        
+        // EXTRA: Prevent mousedown/mouseup from propagating too
+        button.onmousedown = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+        };
+        
+        button.onmouseup = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+        };
+        
+        // NUCLEAR: Prevent any keyboard events too
+        button.onkeydown = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+        };
+        
+        button.onkeyup = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+        };
+        
+        button.onkeypress = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+        };
+    
         container.appendChild(button);
         document.body.appendChild(container);
-
+    
         console.log('Button injected successfully');
     }
 
+    // Update the openSidebar() function to move the button:
+
     async function openSidebar() {
         console.log('Button clicked!');
-
+        
+        // STEP 1: Disable ALL GitHub inputs FIRST
+        const githubInputs = Array.from(document.querySelectorAll('input, textarea'))
+            .filter(el => !el.closest('#codebase-navigator-sidebar'));
+        
+        githubInputs.forEach(input => {
+            input.dataset.wasDisabled = input.disabled;
+            input.disabled = true;
+            input.readOnly = true;
+            input.value = ''; // Clear any autofilled values
+        });
+        
+        // STEP 2: Blur any active element
+        if (document.activeElement && document.activeElement !== document.body) {
+            document.activeElement.blur();
+        }
+        
+        // STEP 3: Clear any selections
+        if (window.getSelection) {
+            window.getSelection().removeAllRanges();
+        }
+        
+        // STEP 4: Focus body to ensure nothing else gets focus
+        document.body.focus();
+    
         const existing = document.getElementById('codebase-navigator-sidebar');
+        const buttonContainer = document.getElementById('codebase-nav-button');
+    
         if (existing) {
             existing.remove();
+            // Move button back to original position
+            if (buttonContainer) {
+                buttonContainer.style.right = '30px';
+            }
+            
+            // Re-enable GitHub inputs
+            githubInputs.forEach(input => {
+                input.disabled = input.dataset.wasDisabled === 'true';
+                input.readOnly = false;
+                delete input.dataset.wasDisabled;
+            });
+            
             return;
         }
-
+    
+        // Move button to the left to avoid sidebar
+        if (buttonContainer) {
+            buttonContainer.style.right = '530px';
+        }
+    
         const path = window.location.pathname.split('/').filter(p => p);
         const owner = path[0];
         const repo = path[1];
-
+    
         console.log('Opening sidebar for:', owner, '/', repo);
-
+    
         const sidebar = createSidebar(owner, repo);
+        
+        // Add anti-autofill attribute to the sidebar itself
+        sidebar.setAttribute('data-lpignore', 'true');
+        sidebar.setAttribute('data-1p-ignore', 'true');
+        
         document.body.appendChild(sidebar);
-
+        
+        // Re-enable GitHub inputs after sidebar is rendered
+        setTimeout(() => {
+            githubInputs.forEach(input => {
+                input.disabled = input.dataset.wasDisabled === 'true';
+                input.readOnly = false;
+                delete input.dataset.wasDisabled;
+            });
+        }, 1000);
+    
         try {
             const data = await fetchRepoData(owner, repo);
             globalData = data;
@@ -150,6 +600,29 @@
             overflow-y: auto;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             color: #c9d1d9;
+          }
+
+          .search-filter-btn {
+            padding: 6px 12px;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #8b949e;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+          }
+          
+          .search-filter-btn:hover {
+            background: #30363d;
+            color: #c9d1d9;
+          }
+          
+          .search-filter-btn.active {
+            background: #238636;
+            color: #ffffff;
+            border-color: #238636;
           }
           .sidebar-header {
             position: sticky;
@@ -193,10 +666,41 @@
             z-index: 9;
             overflow-x: auto;
           }
+          .nav-tabs {
+            display: flex;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            position: sticky;
+            top: 64px;
+            z-index: 9;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: #30363d #161b22;
+          }
+          
+          .nav-tabs::-webkit-scrollbar {
+            height: 4px;
+          }
+          
+          .nav-tabs::-webkit-scrollbar-track {
+            background: #161b22;
+          }
+          
+          .nav-tabs::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 2px;
+          }
+          
+          .nav-tabs::-webkit-scrollbar-thumb:hover {
+            background: #484f58;
+          }
+          
           .nav-tab {
-            flex: 1;
-            min-width: 70px;
-            padding: 10px 6px;
+            flex-shrink: 0;
+            min-width: 65px;
+            max-width: 85px;
+            padding: 10px 8px;
             text-align: center;
             cursor: pointer;
             border-bottom: 2px solid transparent;
@@ -209,11 +713,15 @@
             border-right: none;
             border-top: none;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
           }
+          
           .nav-tab:hover {
             color: #c9d1d9;
             background: #21262d;
           }
+          
           .nav-tab.active {
             color: #c9d1d9;
             border-bottom-color: #f78166;
@@ -283,6 +791,8 @@
             margin-bottom: 8px;
             cursor: pointer;
             transition: background 0.15s;
+            display: block; 
+            position: relative;
           }
           .file-item:hover {
             background: #21262d;
@@ -377,6 +887,7 @@
             transition: background 0.1s;
             font-size: 13px;
             user-select: none;
+            flex-wrap: wrap;
           }
           .tree-item:hover {
             background: #21262d;
@@ -721,8 +1232,8 @@
         <div class="sidebar-header">
   <div style="display: flex; align-items: center; gap: 12px; flex: 1;">
     <img src="${chrome.runtime.getURL('icons/logo32light.png')}" 
-     alt="GitNav Logo" 
-     style="width: 32px; height: 32px; border-radius: 6px;" />
+         alt="GitNav Logo" 
+         style="width: 32px; height: 32px; border-radius: 6px;" />
     <div style="flex: 1;">
       <h2 class="sidebar-title" style="margin: 0;">${owner}/${repo}</h2>
       <div id="rate-limit-status" style="font-size: 11px; color: #8b949e; margin-top: 4px;"></div>
@@ -755,18 +1266,18 @@
         <div class="nav-tabs">
           <button class="nav-tab active" data-tab="overview">Overview</button>
           <button class="nav-tab" data-tab="visualize">Visualize</button>
-          <button class="nav-tab" data-tab="tree">Tree</button>
+          <button class="nav-tab" data-tab="tools">Tools</button>
           <button class="nav-tab" data-tab="search">Search</button>
           <button class="nav-tab" data-tab="insights">Insights</button>
           <button class="nav-tab" data-tab="metrics">Metrics</button>
-          <button class="nav-tab" data-tab="tools">Tools</button>
-          <button class="nav-tab" data-tab="contributors">Contributors</button>
+          <button class="nav-tab" data-tab="tree">Tree</button>
+          <button class="nav-tab" data-tab="contributors">People</button>
           <button class="nav-tab" data-tab="dependencies">Deps</button>
-          <button class="nav-tab" data-tab="tech">Tech Stack</button>
+          <button class="nav-tab" data-tab="tech">Tech</button>
           <button class="nav-tab" data-tab="security">Security</button>
           <button class="nav-tab" data-tab="about">About</button>
-          
         </div>
+
         <div id="sidebar-main-content">
           <div class="loading">
             <div class="spinner"></div>
@@ -780,8 +1291,28 @@
                 clearInterval(rateLimitInterval);
                 rateLimitInterval = null;
             }
+
+            const buttonContainer = document.getElementById('codebase-nav-button');
+            if (buttonContainer) {
+                buttonContainer.style.right = '30px';
+            }
+
+            cleanupAllEventListeners();
             sidebar.remove();
         };
+
+        sidebar.querySelectorAll('div[title*="commits"]').forEach(dot => {
+            dot.addEventListener('mouseenter', () => {
+                dot.style.transform = 'scale(1.5)';
+                dot.style.zIndex = '10';
+            });
+        
+            dot.addEventListener('mouseleave', () => {
+                dot.style.transform = 'scale(1)';
+                dot.style.zIndex = '1';
+            });
+        });
+
         const tokenInput = sidebar.querySelector('#github-token-input');
         const saveTokenBtn = sidebar.querySelector('#save-token-btn');
         const tokenStatus = sidebar.querySelector('#token-status');
@@ -800,13 +1331,13 @@
                 try {
                     const headers = { 'Authorization': `token ${token}` };
                     const test = await fetch(`${GITHUB_API}/user`, { headers });
-                    
+
                     if (test.ok) {
                         await saveToken(token);
                         tokenStatus.style.display = 'flex';
                         tokenStatus.className = 'token-status success';
                         tokenStatus.innerHTML = 'Token saved! Refreshing...';
-                        
+
                         setTimeout(() => {
                             location.reload();
                         }, 1500);
@@ -828,18 +1359,34 @@
     }
 
 
-    async function checkRateLimit() {
+    async function updateRateLimitDisplay() {
         try {
-            const headers = await getAuthHeaders(); // ADD THIS LINE
-            const rateLimitRes = await fetch(`${GITHUB_API}/rate_limit`, { headers }); // ADD { headers }
-            const rateLimit = await rateLimitRes.json();
+            const headers = await getAuthHeaders();
+            const response = await fetch(`${GITHUB_API}/rate_limit`, { headers });
+            
+            if (!response.ok) {
+                console.warn('Could not fetch rate limit');
+                return;
+            }
+            
+            const data = await response.json();
+            const display = document.getElementById('rate-limit-status');
     
-            if (rateLimit.rate.remaining < CONFIG.API_RATE_LIMIT_WARNING) {
-                const resetTime = new Date(rateLimit.rate.reset * 1000);
-                throw new Error(`GitHub API rate limit low. Resets at ${resetTime.toLocaleTimeString()}`);
+            if (display) {
+                const remaining = data.rate.remaining;
+                const limit = data.rate.limit;
+                const resetTime = new Date(data.rate.reset * 1000).toLocaleTimeString();
+    
+                if (remaining < CONFIG.API_RATE_LIMIT_WARNING) {
+                    display.style.color = '#da3633';
+                    display.textContent = `${remaining}/${limit} API requests left (resets at ${resetTime})`;
+                } else {
+                    display.style.color = '#8b949e';
+                    display.textContent = `${remaining}/${limit} API requests remaining`;
+                }
             }
         } catch (e) {
-            console.warn('Could not check rate limit');
+            
         }
     }
 
@@ -850,21 +1397,19 @@
         // Check cache first
         if (repoCache[cacheKey] && (now - repoCache[cacheKey].timestamp) < CONFIG.CACHE_DURATION) {
             console.log('Using cached data for', cacheKey);
+            // ADDED: Restore the default branch from cache
+            globalDefaultBranch = repoCache[cacheKey].defaultBranch || 'main';
             return repoCache[cacheKey].data;
         }
     
         console.log('Fetching:', `${GITHUB_API}/repos/${owner}/${repo}`);
     
         try {
-            await checkRateLimit();
-            
-            // ========== ADD AUTH HEADERS HERE ==========
             const headers = await getAuthHeaders();
-            // ========== END AUTH HEADERS ==========
     
             // Fetch repo info first
             const infoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, { headers });
-            
+    
             if (!infoRes.ok) {
                 if (infoRes.status === 403) {
                     const rateLimitRes = await fetch(`${GITHUB_API}/rate_limit`, { headers });
@@ -884,19 +1429,24 @@
             const info = await infoRes.json();
             const defaultBranch = info.default_branch || 'main';
             
+            // ADDED: Store the default branch globally
+            globalDefaultBranch = defaultBranch;
+    
             console.log('Default branch:', defaultBranch);
     
             // Try default branch first, then fallback
             let treeRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`, { headers });
-            
+    
             if (!treeRes.ok) {
                 console.log(`Branch ${defaultBranch} failed, trying alternative...`);
                 const altBranch = defaultBranch === 'main' ? 'master' : 'main';
                 treeRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}/git/trees/${altBranch}?recursive=1`, { headers });
-                
+    
                 if (!treeRes.ok) {
                     throw new Error(`Could not fetch repository tree. Tried branches: ${defaultBranch}, ${altBranch}`);
                 }
+                // ADDED: Update global branch if we used alternative
+                globalDefaultBranch = altBranch;
             }
     
             // Fetch commits and contributors (non-blocking)
@@ -933,7 +1483,8 @@
             // Store in cache
             repoCache[cacheKey] = {
                 data: data,
-                timestamp: now
+                timestamp: now,
+                defaultBranch: globalDefaultBranch  // ADDED: Store default branch in cache
             };
     
             console.log('✓ Data cached for', cacheKey);
@@ -1146,6 +1697,102 @@
         };
     }
 
+    function calculatePerformanceMetrics(files, dependencies) {
+        const metrics = {
+            bundleSize: {
+                total: 0,
+                byType: {},
+                largest: []
+            },
+            unusedDeps: [],
+            heavyDeps: []
+        };
+    
+        const bundleFiles = files.filter(f => 
+            f.path.match(/\.(js|jsx|ts|tsx|css|scss|sass|json)$/i) &&
+            !f.path.includes('node_modules') &&
+            !f.path.includes('test') &&
+            !f.path.includes('spec')
+        );
+    
+        bundleFiles.forEach(file => {
+            const ext = file.path.split('.').pop().toLowerCase();
+            metrics.bundleSize.total += file.size || 0;
+            metrics.bundleSize.byType[ext] = (metrics.bundleSize.byType[ext] || 0) + (file.size || 0);
+        });
+    
+        metrics.bundleSize.largest = bundleFiles
+            .filter(f => f.size > 50000)
+            .sort((a, b) => b.size - a.size)
+            .slice(0, 10)
+            .map(f => ({
+                path: f.path,
+                size: f.size,
+                percentage: ((f.size / metrics.bundleSize.total) * 100).toFixed(1)
+            }));
+    
+        const allDeps = [
+            ...dependencies.npm,
+            ...dependencies.python,
+            ...dependencies.flutter,
+            ...dependencies.rust
+        ];
+    
+        if (allDeps.length > 0) {
+            const codeContent = files
+                .filter(f => f.path.match(/\.(js|jsx|ts|tsx|py|dart|rs)$/i))
+                .map(f => f.path.toLowerCase())
+                .join(' ');
+    
+            metrics.unusedDeps = allDeps
+                .filter(dep => {
+                    const depName = dep.name.toLowerCase();
+                    return !codeContent.includes(depName.replace(/-/g, ''));
+                })
+                .slice(0, 5)
+                .map(dep => dep.name);
+        }
+    
+        const heavyPackages = {
+            'moment': '~300KB',
+            'lodash': '~70KB',
+            'axios': '~15KB',
+            'react': '~40KB',
+            'vue': '~90KB',
+            'angular': '~500KB',
+            'jquery': '~90KB',
+            'bootstrap': '~150KB',
+            '@material-ui/core': '~300KB',
+            'antd': '~1.2MB',
+            'chart.js': '~200KB'
+        };
+    
+        allDeps.forEach(dep => {
+            if (heavyPackages[dep.name]) {
+                metrics.heavyDeps.push({
+                    name: dep.name,
+                    size: heavyPackages[dep.name],
+                    alternative: getAlternative(dep.name)
+                });
+            }
+        });
+    
+        return metrics;
+    }
+
+    function getAlternative(packageName) {
+        const alternatives = {
+            'moment': 'date-fns or dayjs',
+            'lodash': 'lodash-es or native ES6',
+            'jquery': 'Vanilla JS',
+            'bootstrap': 'Tailwind CSS',
+            '@material-ui/core': 'Headless UI or Radix',
+            'antd': 'Shadcn/ui',
+            'chart.js': 'Recharts or Victory'
+        };
+        return alternatives[packageName] || 'Check bundlephobia.com';
+    }
+
     function calculateComplexityScore(files) {
         let score = 0;
         const deepNesting = files.filter(f => f.path.split('/').length > 5).length;
@@ -1162,6 +1809,286 @@
 
         return Math.min(100, score);
     }
+
+    function calculateCodeQuality(files, data) {
+        const scores = {
+            maintainability: 100,
+            testability: 100,
+            documentation: 100,
+            structure: 100,
+            overall: 0
+        };
+
+        const issues = {
+            maintainability: [],
+            testability: [],
+            documentation: [],
+            structure: []
+        };
+
+        // Maintainability scoring
+        const largeFiles = files.filter(f => f.size > 100000);
+        if (largeFiles.length > 10) {
+            scores.maintainability -= 30;
+            issues.maintainability.push('Too many large files (>100KB)');
+        } else if (largeFiles.length > 5) {
+            scores.maintainability -= 15;
+            issues.maintainability.push('Several large files detected');
+        }
+
+        const veryLargeFiles = files.filter(f => f.size > 500000);
+        if (veryLargeFiles.length > 0) {
+            scores.maintainability -= 20;
+            issues.maintainability.push(`${veryLargeFiles.length} file(s) >500KB`);
+        }
+
+        // Deep nesting check
+        const deeplyNested = files.filter(f => f.path.split('/').length > 6);
+        if (deeplyNested.length > 20) {
+            scores.maintainability -= 15;
+            issues.maintainability.push('Deep folder nesting detected');
+        }
+
+        // Testability scoring
+        const testFiles = files.filter(f =>
+            f.path.includes('test') ||
+            f.path.includes('spec') ||
+            f.path.includes('__tests__') ||
+            f.path.match(/\.(test|spec)\./i)
+        );
+
+        const codeFiles = files.filter(f =>
+            f.path.match(/\.(js|jsx|ts|tsx|py|dart|rs|go|java|cpp|c)$/i)
+        );
+
+        const testCoverage = codeFiles.length > 0 ? (testFiles.length / codeFiles.length) * 100 : 0;
+
+        if (testCoverage === 0) {
+            scores.testability = 30;
+            issues.testability.push('No test files found');
+        } else if (testCoverage < 10) {
+            scores.testability = 50;
+            issues.testability.push('Very low test coverage');
+        } else if (testCoverage < 20) {
+            scores.testability = 70;
+            issues.testability.push('Low test coverage');
+        } else if (testCoverage < 30) {
+            scores.testability = 85;
+        }
+
+        // Documentation scoring
+        const readme = files.find(f => f.path.toLowerCase() === 'readme.md');
+        const contributing = files.find(f => f.path.toLowerCase() === 'contributing.md');
+        const changelog = files.find(f => f.path.toLowerCase() === 'changelog.md');
+        const docFiles = files.filter(f =>
+            f.path.match(/\.(md|txt|rst|adoc)$/i) ||
+            f.path.toLowerCase().includes('doc')
+        );
+
+        if (!readme) {
+            scores.documentation -= 40;
+            issues.documentation.push('Missing README.md');
+        } else if (readme.size < 500) {
+            scores.documentation -= 20;
+            issues.documentation.push('README is very short');
+        }
+
+        if (!contributing) {
+            scores.documentation -= 15;
+            issues.documentation.push('No CONTRIBUTING.md');
+        }
+
+        if (docFiles.length === 0) {
+            scores.documentation -= 25;
+            issues.documentation.push('No documentation files');
+        } else if (docFiles.length < 3) {
+            scores.documentation -= 10;
+            issues.documentation.push('Limited documentation');
+        }
+
+        // Structure scoring
+        const hasGitignore = files.some(f => f.path === '.gitignore');
+        const hasLicense = files.some(f => f.path.toLowerCase().includes('license'));
+        const hasConfig = files.some(f =>
+            f.path === 'package.json' ||
+            f.path === 'requirements.txt' ||
+            f.path === 'Cargo.toml' ||
+            f.path === 'go.mod'
+        );
+
+        if (!hasGitignore) {
+            scores.structure -= 20;
+            issues.structure.push('Missing .gitignore');
+        }
+
+        if (!hasLicense) {
+            scores.structure -= 15;
+            issues.structure.push('Missing LICENSE file');
+        }
+
+        if (!hasConfig) {
+            scores.structure -= 10;
+            issues.structure.push('No package manager config');
+        }
+
+        const srcFolder = files.some(f =>
+            f.path.startsWith('src/') ||
+            f.path.startsWith('lib/')
+        );
+        if (!srcFolder && codeFiles.length > 10) {
+            scores.structure -= 15;
+            issues.structure.push('No src/ or lib/ folder');
+        }
+
+        // Calculate overall score
+        scores.overall = Math.round(
+            (scores.maintainability + scores.testability + scores.documentation + scores.structure) / 4
+        );
+
+        return { scores, issues };
+    }
+
+    function analyzeFileRelationships(commits, files) {
+        const relationships = new Map();
+        const coChanges = new Map();
+
+        commits.forEach(commit => {
+            if (commit.files && commit.files.length > 1) {
+                for (let i = 0; i < commit.files.length; i++) {
+                    for (let j = i + 1; j < commit.files.length; j++) {
+                        const file1 = commit.files[i].filename;
+                        const file2 = commit.files[j].filename;
+
+                        const key = [file1, file2].sort().join('::');
+                        coChanges.set(key, (coChanges.get(key) || 0) + 1);
+                    }
+                }
+            }
+        });
+
+        files.forEach(file => {
+            const related = [];
+
+            coChanges.forEach((count, key) => {
+                const [f1, f2] = key.split('::');
+                if (f1 === file.path || f2 === file.path) {
+                    related.push({
+                        file: f1 === file.path ? f2 : f1,
+                        strength: count
+                    });
+                }
+            });
+
+            relationships.set(
+                file.path,
+                related.sort((a, b) => b.strength - a.strength).slice(0, 5)
+            );
+        });
+
+        return relationships;
+    }
+
+    function findRelatedFilesByStructure(filePath, files) {
+        const related = [];
+        const fileName = filePath.split('/').pop();
+        const fileDir = filePath.substring(0, filePath.lastIndexOf('/'));
+        const baseName = fileName.replace(/\.(test|spec)\./i, '.').replace(/\.[^.]+$/, '');
+
+        if (!filePath.match(/\.(test|spec)\./i)) {
+            const testPatterns = [
+                `${baseName}.test.js`,
+                `${baseName}.test.ts`,
+                `${baseName}.spec.js`,
+                `${baseName}.spec.ts`,
+                `${baseName}_test.py`,
+                `${baseName}_spec.rb`
+            ];
+
+            testPatterns.forEach(pattern => {
+                const testFile = files.find(f =>
+                    f.path.endsWith(pattern) ||
+                    f.path.includes(`__tests__/${pattern}`) ||
+                    f.path.includes(`test/${pattern}`)
+                );
+                if (testFile) {
+                    related.push({ file: testFile.path, type: 'Test file' });
+                }
+            });
+        } else {
+            const sourceName = baseName.replace(/\.(test|spec)$/i, '');
+            const sourceFile = files.find(f =>
+                f.path.includes(sourceName) &&
+                !f.path.match(/\.(test|spec)\./i)
+            );
+            if (sourceFile) {
+                related.push({ file: sourceFile.path, type: 'Source file' });
+            }
+        }
+
+        const sameDir = files
+            .filter(f =>
+                f.path.startsWith(fileDir + '/') &&
+                f.path !== filePath &&
+                f.path.split('/').length === filePath.split('/').length
+            )
+            .slice(0, 3);
+
+        sameDir.forEach(f => {
+            related.push({ file: f.path, type: 'Same directory' });
+        });
+
+        if (fileName !== 'index.js' && fileName !== 'index.ts') {
+            const indexFile = files.find(f =>
+                f.path === `${fileDir}/index.js` ||
+                f.path === `${fileDir}/index.ts`
+            );
+            if (indexFile) {
+                related.push({ file: indexFile.path, type: 'Module index' });
+            }
+        }
+
+        const similar = files
+            .filter(f => {
+                const fName = f.path.split('/').pop();
+                const fBase = fName.replace(/\.[^.]+$/, '');
+                return fBase.includes(baseName) && f.path !== filePath;
+            })
+            .slice(0, 2);
+
+        similar.forEach(f => {
+            related.push({ file: f.path, type: 'Similar name' });
+        });
+
+        return related;
+    }
+
+    function analyzeFileHotspots(commits, files) {
+        const editCounts = new Map();
+
+        commits.forEach(commit => {
+            if (commit.files) {
+                commit.files.forEach(file => {
+                    const count = editCounts.get(file.filename) || 0;
+                    editCounts.set(file.filename, count + 1);
+                });
+            }
+        });
+
+        const hotspots = Array.from(editCounts.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([path, count]) => {
+                const file = files.find(f => f.path === path);
+                return {
+                    path,
+                    editCount: count,
+                    size: file?.size || 0
+                };
+            });
+
+        return hotspots;
+    }
+
 
     function analyzeSecurityIssues(files, info) {
         const issues = [];
@@ -1300,15 +2227,26 @@
 
     function buildFileTree(items) {
         const root = { name: '', type: 'folder', children: {}, files: [], path: '' };
-
+    
         items.forEach(item => {
+            // Skip invalid items
+            if (!item || !item.path) return;
+            
             const parts = item.path.split('/');
             let current = root;
-
+    
             parts.forEach((part, index) => {
+                // Skip empty parts
+                if (!part) return;
+                
                 const isLast = index === parts.length - 1;
-
+    
                 if (isLast && item.type === 'blob') {
+                    // Ensure files array exists
+                    if (!current.files) {
+                        current.files = [];
+                    }
+                    
                     current.files.push({
                         name: part,
                         path: item.path,
@@ -1316,6 +2254,11 @@
                         type: 'file'
                     });
                 } else {
+                    // Ensure children object exists
+                    if (!current.children) {
+                        current.children = {};
+                    }
+                    
                     if (!current.children[part]) {
                         current.children[part] = {
                             name: part,
@@ -1329,9 +2272,144 @@
                 }
             });
         });
-
+    
         return root;
     }
+
+    function renderTimelineSection(timeline) {
+        const gradientId = `timelineGradient-${Math.random().toString(36).substr(2, 9)}`;
+        
+        if (!timeline || timeline.length === 0) {
+            return `
+                <div class="section">
+                    <h3 class="section-title">Repository Timeline</h3>
+                    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 20px; text-align: center;">
+                        <div style="color: #8b949e; font-size: 13px;">
+                            No timeline data available
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // Handle single data point case
+        if (timeline.length === 1) {
+            return `
+                <div class="section">
+                    <h3 class="section-title">Repository Timeline</h3>
+                    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px;">
+                        <div style="text-align: center;">
+                            <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">Total Commits</div>
+                            <div style="font-size: 48px; color: #58a6ff; font-weight: 700;">${timeline[0].cumulative}</div>
+                            <div style="font-size: 13px; color: #c9d1d9; margin-top: 8px; font-weight: 600;">${timeline[0].label}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        const maxCommits = Math.max(...timeline.map(t => t.cumulative));
+        const firstLabel = timeline[0].label;
+        const lastLabel = timeline[timeline.length - 1].label;
+        const timeUnit = timeline[0].unit || 'month';
+        
+        // Calculate point positions with proper percentages
+        const points = timeline.map((point, idx) => {
+            const xPercent = 2 + (idx / (timeline.length - 1)) * 96; // 2% to 98%
+            const yPercent = 20 + (1 - (point.cumulative / maxCommits)) * 66.67; // 20% to 86.67%
+            return { 
+                xPercent, 
+                yPercent,
+                label: point.label,
+                commits: point.cumulative
+            };
+        });
+        
+        return `
+            <div class="section">
+                <h3 class="section-title">Repository Timeline</h3>
+                
+                <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <div>
+                            <div style="font-size: 11px; color: #8b949e;">First Activity</div>
+                            <div style="font-size: 14px; color: #c9d1d9; font-weight: 600;">${firstLabel}</div>
+                        </div>
+                        <div style="text-align: center;">
+                            <div style="font-size: 11px; color: #8b949e;">Total Commits</div>
+                            <div style="font-size: 24px; color: #58a6ff; font-weight: 700;">${timeline[timeline.length - 1].cumulative}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="font-size: 11px; color: #8b949e;">Latest Activity</div>
+                            <div style="font-size: 14px; color: #c9d1d9; font-weight: 600;">${lastLabel}</div>
+                        </div>
+                    </div>
+                    
+                    <div style="position: relative; height: 120px; margin-top: 20px; padding: 0 10px;">
+                        <!-- SVG for line and gradient area -->
+                        <svg width="100%" height="120" viewBox="0 0 100 100" preserveAspectRatio="none" 
+                             style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;">
+                            <defs>
+                                <linearGradient id="${gradientId}" x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" style="stop-color:#58a6ff;stop-opacity:0.3" />
+                                    <stop offset="100%" style="stop-color:#58a6ff;stop-opacity:0" />
+                                </linearGradient>
+                            </defs>
+                            
+                            <!-- Filled area under the line -->
+                            <polygon 
+                                points="${points.map(p => `${p.xPercent},${p.yPercent}`).join(' ')} 98,100 2,100" 
+                                fill="url(#${gradientId})" 
+                                stroke="none" />
+                            
+                            <!-- Main line - THICKER NOW -->
+                            <polyline
+                                points="${points.map(p => `${p.xPercent},${p.yPercent}`).join(' ')}"
+                                fill="none"
+                                stroke="#58a6ff"
+                                stroke-width="1.2"
+                                vector-effect="non-scaling-stroke"
+                                stroke-linecap="round"
+                                stroke-linejoin="round" />
+                        </svg>
+                        
+                        <!-- Circles as absolutely positioned divs -->
+                        ${points.map(p => `
+                            <div style="
+                                position: absolute;
+                                left: ${p.xPercent}%;
+                                top: ${p.yPercent}%;
+                                width: 10px;
+                                height: 10px;
+                                margin-left: -5px;
+                                margin-top: -5px;
+                                background: #58a6ff;
+                                border: 2px solid #0d1117;
+                                border-radius: 50%;
+                                cursor: pointer;
+                                transition: all 0.2s ease;
+                            " 
+                            title="${p.label}: ${p.commits} commits"></div>
+                            `).join('')}
+                            </div>
+                    
+                    <div style="display: flex; justify-content: space-between; margin-top: 12px; font-size: 10px; color: #8b949e;">
+                        ${timeline.filter((_, idx) => idx % Math.ceil(timeline.length / 4) === 0).map(t => 
+                            `<div>${t.label}</div>`
+                        ).join('')}
+                    </div>
+                </div>
+                
+                <button class="btn-secondary" id="view-deleted-files-btn" style="width: 100%; margin-bottom: 8px;">
+                    View Deleted Files (Ghost Mode)
+                </button>
+                
+                <div id="deleted-files-container" style="display: none;"></div>
+            </div>
+        `;
+    }
+
+
 
     function renderFileTree(node, owner, repo, level = 0) {
         let html = '';
@@ -1467,12 +2545,12 @@
             const response = await fetch(`${GITHUB_API}/rate_limit`, { headers }); // ADD { headers }
             const data = await response.json();
             const display = document.getElementById('rate-limit-status');
-    
+
             if (display) {
                 const remaining = data.rate.remaining;
                 const limit = data.rate.limit; // ADD THIS LINE
                 const resetTime = new Date(data.rate.reset * 1000).toLocaleTimeString();
-    
+
                 if (remaining < CONFIG.API_RATE_LIMIT_WARNING) {
                     display.style.color = '#da3633';
                     display.textContent = `${remaining}/${limit} API requests left (resets at ${resetTime})`; // CHANGE THIS
@@ -1487,10 +2565,10 @@
     }
 
 
-    function renderSidebar(sidebar, owner, repo, data) {
+    async function renderSidebar(sidebar, owner, repo, data) {
         const mainContent = sidebar.querySelector('#sidebar-main-content');
         const steps = generateOnboardingSteps(data);
-
+    
         mainContent.innerHTML = `
             ${renderOverviewTab(data, steps)}
             ${renderTreeTab()}
@@ -1505,29 +2583,34 @@
             ${renderToolsTab(owner, repo)}
             ${renderAboutTab()}
         `;
-
+    
         setupTabSwitching(sidebar);
         setupEventHandlers(mainContent, owner, repo, data);
-
+    
         // Initial update
         updateRateLimitDisplay();
-
-        // Clear any existing interval
+    
         if (rateLimitInterval) {
             clearInterval(rateLimitInterval);
+            rateLimitInterval = null;
         }
-
-        // Update every 30 seconds
-        rateLimitInterval = setInterval(updateRateLimitDisplay, 60000);
-    }
+    
+        const headers = await getAuthHeaders();
+        const rateLimitRes = await fetch(`${GITHUB_API}/rate_limit`, { headers }).catch(() => null);
+        if (rateLimitRes && rateLimitRes.ok) {
+            const rateData = await rateLimitRes.json();
+            if (rateData.rate.remaining > 0) {
+                rateLimitInterval = setInterval(updateRateLimitDisplay, 560000);
+            }
+        }
+    }  
 
     function setupEventHandlers(container, owner, repo, data) {
-        // File tree must be rendered first
         const treeContainer = container.querySelector('#file-tree-container');
         if (treeContainer) {
             treeContainer.innerHTML = renderFileTree(data.fileTree, owner, repo);
         }
-
+    
         setupFileClickHandlers(container, owner, repo);
         setupTreeToggleHandlers(container);
         setupSearchFunctionality(container, data, owner, repo);
@@ -1535,6 +2618,67 @@
         setupExportTools(container, data, owner, repo);
         setupKeyFilesToggle(container);
         setupVisualizationToggle(container, data, owner, repo);
+        setupLargeFilesToggle(container);
+        setupTimeTravelFeatures(container, owner, repo);
+        setupExpandableList(container, 'bundle-files');
+        setupExpandableList(container, 'secrets');
+        setupExpandableList(container, 'security-issues');
+        
+        // Re-add bookmark icons when switching tabs
+        setupTabSwitching(container.closest('#codebase-navigator-sidebar'), owner, repo);
+    }
+
+    function setupTimeTravelFeatures(container, owner, repo) {
+        const deletedBtn = container.querySelector('#view-deleted-files-btn');
+        const deletedContainer = container.querySelector('#deleted-files-container');
+
+        if (deletedBtn && deletedContainer) {
+            deletedBtn.addEventListener('click', async () => {
+                if (deletedContainer.style.display === 'none') {
+                    deletedBtn.textContent = 'Loading deleted files...';
+                    deletedBtn.disabled = true;
+
+                    const deleted = await detectDeletedFiles(owner, repo);
+
+                    if (deleted.length === 0) {
+                        deletedContainer.innerHTML = `
+                            <div style="text-align: center; color: #8b949e; font-size: 12px; padding: 20px;">
+                                No deleted files found in recent history
+                            </div>
+                        `;
+                    } else {
+                        deletedContainer.innerHTML = `
+                            <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">
+                                Found ${deleted.length} deleted file(s) in recent history
+                            </div>
+                            ${deleted.map(file => `
+                                <div style="background: rgba(218, 54, 51, 0.1); border: 1px solid rgba(218, 54, 51, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                    <div style="font-size: 12px; color: #da3633; font-family: monospace; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                        ${file.path}
+                                    </div>
+                                    <div style="font-size: 11px; color: #8b949e; margin-bottom: 4px;">
+                                        Deleted by ${file.deletedBy} on ${new Date(file.deletedAt).toLocaleDateString()}
+                                    </div>
+                                    <div style="font-size: 11px; color: #8b949e; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                        ${file.commitMessage}
+                                    </div>
+                                    <a href="${file.commitUrl}" target="_blank" style="font-size: 11px; color: #58a6ff; text-decoration: none;">
+                                        View commit
+                                    </a>
+                                </div>
+                            `).join('')}
+                        `;
+                    }
+
+                    deletedContainer.style.display = 'block';
+                    deletedBtn.textContent = 'Hide Deleted Files';
+                    deletedBtn.disabled = false;
+                } else {
+                    deletedContainer.style.display = 'none';
+                    deletedBtn.textContent = 'View Deleted Files (Ghost Mode)';
+                }
+            });
+        }
     }
 
     // Individual tab renderers
@@ -1684,16 +2828,69 @@
             <div class="tab-content" id="tab-search">
                 <div class="section">
                     <h3 class="section-title">Search Files</h3>
-                    <input type="text" class="search-input" id="file-search" placeholder="Type to search files...">
-                    <div id="search-results" style="margin-top: 16px;"></div>
+                    
+                    <!-- Show button first, input hidden -->
+                    <button class="btn-primary" id="activate-search-btn" style="margin-bottom: 16px;">
+                        Click to Activate Search
+                    </button>
+                    
+                    <div id="search-input-container" style="display: none; margin-bottom: 16px;">
+                        <input
+                            type="text"
+                            class="search-input"
+                            id="repo-file-query"
+                            autocomplete="off"
+                            placeholder="Type to search files...">
+                    </div>
+                    
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+                        <button class="search-filter-btn active" data-filter="all">
+                            All
+                        </button>
+                        <button class="search-filter-btn" data-filter="frontend">
+                            Frontend
+                        </button>
+                        <button class="search-filter-btn" data-filter="backend">
+                            Backend
+                        </button>
+                        <button class="search-filter-btn" data-filter="config">
+                            Config
+                        </button>
+                        <button class="search-filter-btn" data-filter="tests">
+                            Tests
+                        </button>
+                        <button class="search-filter-btn" data-filter="docs">
+                            Docs
+                        </button>
+                    </div>
+                    
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+                        <select class="search-input" id="file-type-filter" style="flex: 1;">
+                            <option value="">All file types</option>
+                        </select>
+                        <select class="search-input" id="file-size-filter" style="flex: 1;">
+                            <option value="">All sizes</option>
+                            <option value="small">Small (&lt;10KB)</option>
+                            <option value="medium">Medium (10-100KB)</option>
+                            <option value="large">Large (&gt;100KB)</option>
+                        </select>
+                    </div>
+                    
+                    <div id="search-results"></div>
                 </div>
             </div>
         `;
     }
 
+
+
     function renderInsightsTab(data) {
         const healthClass = getHealthClass(data.stats.healthScore);
         const healthMessage = getHealthMessage(data.stats.healthScore);
+        const healthTips = getHealthTips(data);
+        const codeQuality = calculateCodeQuality(data.files, data);
+        const hotspots = analyzeFileHotspots(data.commits, data.files);
+        const docGaps = analyzeDocumentationGaps(data.files, data);
 
         return `
             <div class="tab-content" id="tab-insights">
@@ -1703,14 +2900,105 @@
                     <div style="text-align: center; color: #8b949e; font-size: 13px; margin-bottom: 20px;">
                         ${healthMessage}
                     </div>
+                    
+                    ${healthTips.length > 0 ? `
+                        <div style="background: rgba(88, 166, 255, 0.1); border: 1px solid rgba(88, 166, 255, 0.3); border-radius: 6px; padding: 12px; margin-top: 16px;">
+                            <div style="font-size: 12px; font-weight: 600; color: #58a6ff; margin-bottom: 8px;">Quick Wins to Improve Health</div>
+                            <div style="font-size: 11px; color: #8b949e; line-height: 1.8;">
+                                ${healthTips.map(tip => `${tip}`).join('<br>')}
+                            </div>
+                        </div>
+                    ` : ''}
                 </div>
     
+                ${renderCodeQualitySection(codeQuality)}
+                ${renderDocumentationGapsSection(docGaps)}
+                ${renderHotspotsSection(hotspots)}
                 ${renderQuickInsights(data)}
                 ${renderFileTypeDistribution(data.stats)}
                 ${renderLargeFiles(data.stats.largFiles)}
                 ${renderRecentCommits(data.commits)}
             </div>
         `;
+    }
+
+    function renderHotspotsSection(hotspots) {
+        if (hotspots.length === 0) return '';
+
+        return `
+            <div class="section">
+                <h3 class="section-title">File Hotspots</h3>
+                <div style="font-size: 11px; color: #8b949e; margin-bottom: 12px;">
+                    Files changed most frequently (may need refactoring)
+                </div>
+                ${hotspots.slice(0, 5).map(file => `
+                    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                        <div style="display: flex; justify-content: between; align-items: start;">
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-size: 12px; color: #c9d1d9; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                    ${file.path}
+                                </div>
+                                <div style="font-size: 10px; color: #8b949e; margin-top: 4px;">
+                                    ${file.editCount} edits • ${formatBytes(file.size)}
+                                </div>
+                            </div>
+                            <div style="margin-left: 12px;">
+                                <div style="background: rgba(218, 54, 51, 0.2); padding: 4px 8px; border-radius: 4px; font-size: 10px; color: #da3633; font-weight: 600; white-space: nowrap;">
+                                    HIGH CHURN
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+
+
+    function getHealthTips(data) {
+        const tips = [];
+
+        // Check for large files
+        if (data.stats.largFiles && data.stats.largFiles.length > 10) {
+            tips.push('Split large files into smaller modules');
+        } else if (data.stats.largFiles && data.stats.largFiles.length > 5) {
+            tips.push('Consider refactoring some large files');
+        }
+
+        // Check for tests
+        const hasTests = data.files.some(f =>
+            f.path.includes('test') ||
+            f.path.includes('spec') ||
+            f.path.includes('__tests__')
+        );
+        if (!hasTests) {
+            tips.push('Add test coverage to improve reliability');
+        }
+
+        // Check for README
+        const hasReadme = data.files.some(f => f.path.toLowerCase() === 'readme.md');
+        if (!hasReadme) {
+            tips.push('Add a README.md with project documentation');
+        }
+
+        // Check for license
+        const hasLicense = data.files.some(f => f.path.toLowerCase().includes('license'));
+        if (!hasLicense) {
+            tips.push('Add a LICENSE file for legal clarity');
+        }
+
+        // Check for too many files
+        if (data.files.length > 1000) {
+            tips.push('Consider archiving or removing unused files');
+        }
+
+        // Check for .gitignore
+        const hasGitignore = data.files.some(f => f.path === '.gitignore');
+        if (!hasGitignore) {
+            tips.push('Add .gitignore to exclude unnecessary files');
+        }
+
+        return tips;
     }
 
     function getHealthClass(score) {
@@ -1775,10 +3063,14 @@
     function renderLargeFiles(largFiles) {
         if (!largFiles || largFiles.length === 0) return '';
 
+        const visibleFiles = largFiles.slice(0, 3);
+        const hiddenFiles = largFiles.slice(3);
+
         return `
-            <div class="section">
-                <h3 class="section-title">Large Files (>100KB)</h3>
-                ${largFiles.slice(0, 5).map(file => `
+        <div class="section">
+            <h3 class="section-title">Large Files (>100KB)</h3>
+            <div id="large-files-visible">
+                ${visibleFiles.map(file => `
                     <div class="file-item" data-path="${file.path}">
                         <div class="file-name">${file.path.split('/').pop()}</div>
                         <div class="file-path">${file.path}</div>
@@ -1786,7 +3078,25 @@
                     </div>
                 `).join('')}
             </div>
-        `;
+            
+            ${hiddenFiles.length > 0 ? `
+                <div id="large-files-hidden" style="display: none;">
+                    ${hiddenFiles.map(file => `
+                        <div class="file-item" data-path="${file.path}">
+                            <div class="file-name">${file.path.split('/').pop()}</div>
+                            <div class="file-path">${file.path}</div>
+                            <span class="file-type-badge">${formatBytes(file.size)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                
+                <button class="btn-secondary" id="toggle-large-files" style="width: 100%; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                    <span>Show ${hiddenFiles.length} More</span>
+                    <span style="transition: transform 0.2s;">▼</span>
+                </button>
+            ` : ''}
+        </div>
+    `;
     }
 
     function renderRecentCommits(commits) {
@@ -1807,15 +3117,214 @@
         `;
     }
 
+    function renderCodeQualitySection(codeQuality) {
+        const { scores, issues } = codeQuality;
+
+        function getScoreColor(score) {
+            if (score >= 80) return '#3fb950';
+            if (score >= 60) return '#58a6ff';
+            if (score >= 40) return '#d29922';
+            return '#da3633';
+        }
+
+        function getScoreLabel(score) {
+            if (score >= 80) return 'Excellent';
+            if (score >= 60) return 'Good';
+            if (score >= 40) return 'Fair';
+            return 'Needs Work';
+        }
+
+        return `
+            <div class="section">
+                <h3 class="section-title">Code Quality Analysis</h3>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px;">
+                    ${Object.entries(scores).filter(([key]) => key !== 'overall').map(([key, score]) => `
+                        <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;">
+                            <div style="font-size: 11px; color: #8b949e; text-transform: capitalize; margin-bottom: 6px;">
+                                ${key}
+                            </div>
+                            <div style="display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px;">
+                                <div style="font-size: 24px; font-weight: 700; color: ${getScoreColor(score)};">
+                                    ${score}
+                                </div>
+                                <div style="font-size: 11px; color: #8b949e;">/100</div>
+                            </div>
+                            <div style="font-size: 10px; color: ${getScoreColor(score)};">
+                                ${getScoreLabel(score)}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+    
+                <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; text-align: center; margin-bottom: 16px;">
+                    <div style="font-size: 12px; color: #8b949e; margin-bottom: 8px;">Overall Quality Score</div>
+                    <div style="font-size: 48px; font-weight: 700; color: ${getScoreColor(scores.overall)}; line-height: 1;">
+                        ${scores.overall}
+                    </div>
+                    <div style="font-size: 14px; color: ${getScoreColor(scores.overall)}; margin-top: 4px;">
+                        ${getScoreLabel(scores.overall)}
+                    </div>
+                </div>
+    
+                ${Object.entries(issues).some(([_, list]) => list.length > 0) ? `
+                    <div style="background: rgba(218, 54, 51, 0.1); border: 1px solid rgba(218, 54, 51, 0.3); border-radius: 6px; padding: 12px;">
+                        <div style="font-size: 12px; font-weight: 600; color: #da3633; margin-bottom: 10px;">
+                            Issues Found
+                        </div>
+                        ${Object.entries(issues).map(([category, issueList]) => {
+            if (issueList.length === 0) return '';
+            return `
+                                <div style="margin-bottom: 8px;">
+                                    <div style="font-size: 11px; font-weight: 600; color: #c9d1d9; text-transform: capitalize; margin-bottom: 4px;">
+                                        ${category}
+                                    </div>
+                                    ${issueList.map(issue => `
+                                        <div style="font-size: 11px; color: #8b949e; margin-left: 12px; margin-bottom: 2px;">
+                                            • ${issue}
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            `;
+        }).join('')}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
     function renderMetricsTab(data) {
+        const performanceMetrics = calculatePerformanceMetrics(data.files, data.dependencies);
+        const timeline = analyzeRepositoryGrowth(data.commits);
+        
         return `
             <div class="tab-content" id="tab-metrics">
                 ${renderCodeMetricsCards(data.metrics)}
+                ${timeline && timeline.length > 0 ? renderTimelineSection(timeline) : ''}
+                ${renderPerformanceSection(performanceMetrics)}
                 ${renderComplexityScore(data.metrics)}
                 ${renderCommitActivity(data.metrics)}
             </div>
         `;
     }
+
+    function renderPerformanceSection(metrics) {
+        return `
+            <div class="section">
+                <h3 class="section-title">Performance Analysis</h3>
+                
+                <div class="metric-grid">
+                    <div class="insight-card">
+                        <div class="insight-value">${formatBytes(metrics.bundleSize.total)}</div>
+                        <div class="insight-label">Estimated Bundle Size</div>
+                    </div>
+                    <div class="insight-card">
+                        <div class="insight-value">${metrics.bundleSize.largest.length}</div>
+                        <div class="insight-label">Large Files</div>
+                    </div>
+                </div>
+    
+                ${metrics.bundleSize.largest.length > 0 ? `
+                    <div style="margin-top: 16px;">
+                        <div style="font-size: 13px; font-weight: 600; color: #c9d1d9; margin-bottom: 10px;">
+                            Largest Bundle Contributors
+                        </div>
+                        <div id="visible-bundle-files">
+                            ${metrics.bundleSize.largest.slice(0, 3).map(file => `
+                                <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                        <div style="font-size: 12px; color: #c9d1d9; font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                            ${file.path}
+                                        </div>
+                                        <div style="font-size: 12px; color: #d29922; font-weight: 600; margin-left: 12px;">
+                                            ${formatBytes(file.size)}
+                                        </div>
+                                    </div>
+                                    <div style="background: #0d1117; height: 6px; border-radius: 3px; overflow: hidden;">
+                                        <div style="background: #d29922; height: 100%; width: ${file.percentage}%;"></div>
+                                    </div>
+                                    <div style="font-size: 10px; color: #8b949e; margin-top: 4px;">
+                                        ${file.percentage}% of bundle
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        
+                        ${metrics.bundleSize.largest.length > 3 ? `
+                            <div id="hidden-bundle-files" style="display: none;">
+                                ${metrics.bundleSize.largest.slice(3).map(file => `
+                                    <div class="expandable-item" style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                            <div style="font-size: 12px; color: #c9d1d9; font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                ${file.path}
+                                            </div>
+                                            <div style="font-size: 12px; color: #d29922; font-weight: 600; margin-left: 12px;">
+                                                ${formatBytes(file.size)}
+                                            </div>
+                                        </div>
+                                        <div style="background: #0d1117; height: 6px; border-radius: 3px; overflow: hidden;">
+                                            <div style="background: #d29922; height: 100%; width: ${file.percentage}%;"></div>
+                                        </div>
+                                        <div style="font-size: 10px; color: #8b949e; margin-top: 4px;">
+                                            ${file.percentage}% of bundle
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            
+                            <button class="btn-secondary" id="toggle-bundle-files" style="width: 100%; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                                <span class="btn-text">Show ${metrics.bundleSize.largest.length - 3} More</span>
+                                <span class="arrow-icon" style="transition: transform 0.2s;">▼</span>
+                            </button>
+                        ` : ''}
+                    </div>
+                ` : ''}
+    
+                ${metrics.heavyDeps.length > 0 ? `
+                    <div style="margin-top: 16px;">
+                        <div style="font-size: 13px; font-weight: 600; color: #c9d1d9; margin-bottom: 10px;">
+                            Heavy Dependencies Detected
+                        </div>
+                        ${metrics.heavyDeps.map(dep => `
+                            <div style="background: rgba(210, 153, 34, 0.1); border: 1px solid rgba(210, 153, 34, 0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div>
+                                        <div style="font-size: 12px; color: #c9d1d9; font-weight: 600; font-family: monospace;">
+                                            ${dep.name}
+                                        </div>
+                                        <div style="font-size: 11px; color: #8b949e; margin-top: 2px;">
+                                            Consider: ${dep.alternative}
+                                        </div>
+                                    </div>
+                                    <div style="font-size: 11px; color: #d29922; font-weight: 600;">
+                                        ${dep.size}
+                                    </div>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                ` : ''}
+    
+                ${metrics.unusedDeps.length > 0 ? `
+                    <div style="margin-top: 16px;">
+                        <div style="font-size: 13px; font-weight: 600; color: #c9d1d9; margin-bottom: 10px;">
+                            Potentially Unused Dependencies
+                        </div>
+                        <div style="background: rgba(88, 166, 255, 0.1); border: 1px solid rgba(88, 166, 255, 0.3); border-radius: 6px; padding: 10px;">
+                            <div style="font-size: 11px; color: #8b949e; line-height: 1.8;">
+                                ${metrics.unusedDeps.map(dep => `${dep}`).join('<br>')}
+                            </div>
+                            <div style="font-size: 10px; color: #8b949e; margin-top: 8px; font-style: italic;">
+                                Note: These may be indirect dependencies. Verify before removing.
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+    
+
 
     function renderCodeMetricsCards(metrics) {
         const metricItems = [
@@ -1960,16 +3469,287 @@
         `;
     }
 
-    function renderSecurityTab(data) {
+    function detectSecretPatterns(files) {
+        const secrets = [];
+        const patterns = [
+            { name: 'AWS Access Key', regex: /AKIA[0-9A-Z]{16}/, severity: 'high' },
+            { name: 'AWS Secret Key', regex: /aws_secret_access_key\s*=\s*["']?([A-Za-z0-9/+=]{40})["']?/i, severity: 'high' },
+            { name: 'GitHub Token', regex: /gh[pousr]_[A-Za-z0-9]{36}/, severity: 'high' },
+            { name: 'Generic API Key', regex: /api[_-]?key\s*[=:]\s*["']?([A-Za-z0-9_\-]{20,})["']?/i, severity: 'high' },
+            { name: 'Private Key', regex: /-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----/, severity: 'high' },
+            { name: 'JWT Token', regex: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, severity: 'medium' },
+            { name: 'Database URL', regex: /(mongodb|mysql|postgres|redis):\/\/[^\s]+:[^\s]+@[^\s]+/i, severity: 'high' },
+            { name: 'Slack Token', regex: /xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}/, severity: 'high' },
+            { name: 'Stripe Key', regex: /sk_live_[0-9a-zA-Z]{24}/, severity: 'high' },
+            { name: 'Google API Key', regex: /AIza[0-9A-Za-z_-]{35}/, severity: 'high' },
+            { name: 'Password in Code', regex: /(password|passwd|pwd)\s*[=:]\s*["']([^"'\s]{8,})["']/i, severity: 'medium' },
+            { name: 'Twilio Key', regex: /SK[0-9a-fA-F]{32}/, severity: 'high' },
+            { name: 'SendGrid Key', regex: /SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}/, severity: 'high' }
+        ];
+
+        files.forEach(file => {
+            if (file.path.includes('node_modules') || file.path.includes('.git')) return;
+
+            const suspicious = ['.env', 'config', 'secret', 'credential', 'key', 'token', 'password'];
+            const isSuspicious = suspicious.some(s => file.path.toLowerCase().includes(s));
+
+            if (isSuspicious) {
+                patterns.forEach(pattern => {
+                    secrets.push({
+                        file: file.path,
+                        type: pattern.name,
+                        severity: pattern.severity,
+                        line: 'Multiple locations'
+                    });
+                });
+            }
+        });
+
+        return secrets.slice(0, 15);
+    }
+
+    function analyzeVulnerabilities(dependencies, files) {
+        const vulnerabilities = [];
+
+        const knownVulnerable = {
+            'lodash': { versions: ['<4.17.21'], cve: 'CVE-2021-23337', description: 'Command injection' },
+            'axios': { versions: ['<0.21.3'], cve: 'CVE-2021-3749', description: 'Server-side request forgery' },
+            'moment': { versions: ['<2.29.4'], cve: 'CVE-2022-31129', description: 'Path traversal' },
+            'express': { versions: ['<4.17.3'], cve: 'CVE-2022-24999', description: 'Open redirect' },
+            'minimist': { versions: ['<1.2.6'], cve: 'CVE-2021-44906', description: 'Prototype pollution' },
+            'node-fetch': { versions: ['<2.6.7'], cve: 'CVE-2022-0235', description: 'Exposure of sensitive information' },
+            'trim': { versions: ['<0.0.3'], cve: 'CVE-2020-7753', description: 'Regular expression denial of service' },
+            'ua-parser-js': { versions: ['<0.7.33'], cve: 'CVE-2022-25927', description: 'Malicious package' },
+            'path-parse': { versions: ['<1.0.7'], cve: 'CVE-2021-23343', description: 'Regular expression denial of service' },
+            'ansi-regex': { versions: ['<5.0.1'], cve: 'CVE-2021-3807', description: 'Regular expression denial of service' }
+        };
+
+        const allDeps = [
+            ...dependencies.npm,
+            ...dependencies.python,
+            ...dependencies.flutter,
+            ...dependencies.rust
+        ];
+
+        allDeps.forEach(dep => {
+            if (knownVulnerable[dep.name]) {
+                const vuln = knownVulnerable[dep.name];
+                vulnerabilities.push({
+                    package: dep.name,
+                    version: dep.version,
+                    cve: vuln.cve,
+                    description: vuln.description,
+                    severity: 'high'
+                });
+            }
+        });
+
+        return vulnerabilities;
+    }
+
+    function checkInsecurePractices(files) {
+        const issues = [];
+
+        const hasHttpsCheck = files.some(f =>
+            f.path.match(/\.(js|jsx|ts|tsx|py)$/i) &&
+            f.path.toLowerCase().includes('http')
+        );
+
+        const hasCors = files.some(f =>
+            f.path.toLowerCase().includes('cors') ||
+            f.path.toLowerCase().includes('middleware')
+        );
+
+        if (hasHttpsCheck) {
+            issues.push({
+                type: 'HTTP Usage',
+                description: 'Files contain HTTP references, ensure HTTPS is enforced',
+                severity: 'medium'
+            });
+        }
+
+        const hasAuth = files.some(f =>
+            f.path.toLowerCase().includes('auth') ||
+            f.path.toLowerCase().includes('login')
+        );
+
+        const hasSession = files.some(f =>
+            f.path.toLowerCase().includes('session') ||
+            f.path.toLowerCase().includes('jwt')
+        );
+
+        if (hasAuth && !hasSession) {
+            issues.push({
+                type: 'Authentication',
+                description: 'Authentication files found but no session management detected',
+                severity: 'medium'
+            });
+        }
+
+        const hasUpload = files.some(f =>
+            f.path.toLowerCase().includes('upload') ||
+            f.path.toLowerCase().includes('file')
+        );
+
+        if (hasUpload) {
+            issues.push({
+                type: 'File Upload',
+                description: 'File upload functionality detected, ensure proper validation',
+                severity: 'medium'
+            });
+        }
+
+        return issues;
+    }
+
+    function renderSecurityRecommendations() {
         return `
-            <div class="tab-content" id="tab-security">
+            <div class="section">
+                <h3 class="section-title">Security Best Practices</h3>
+                <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;">
+                    <div style="color: #8b949e; font-size: 12px; line-height: 1.8;">
+                        <div style="padding: 8px 0; border-bottom: 1px solid #30363d;">
+                            <strong style="color: #c9d1d9;">Dependency Management</strong><br>
+                            Run npm audit or equivalent regularly<br>
+                            Keep dependencies up to date<br>
+                            Use lock files for reproducible builds
+                        </div>
+                        <div style="padding: 8px 0; border-bottom: 1px solid #30363d;">
+                            <strong style="color: #c9d1d9;">Secret Management</strong><br>
+                            Never commit credentials to git<br>
+                            Use environment variables<br>
+                            Implement secret rotation policies
+                        </div>
+                        <div style="padding: 8px 0;">
+                            <strong style="color: #c9d1d9;">Code Security</strong><br>
+                            Enable branch protection rules<br>
+                            Require code reviews<br>
+                            Use static analysis tools
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // REPLACE renderSecurityTab function with this updated version
+
+function renderSecurityTab(data) {
+    const secrets = detectSecretPatterns(data.files);
+    const vulnerabilities = analyzeVulnerabilities(data.dependencies, data.files);
+    const insecurePractices = checkInsecurePractices(data.files);
+    const allIssues = [...data.security, ...insecurePractices];
+
+    return `
+        <div class="tab-content" id="tab-security">
+            <div class="section">
+                <h3 class="section-title">Security Overview</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+                    <div class="insight-card">
+                        <div class="insight-value" style="color: ${secrets.length > 0 ? '#da3633' : '#3fb950'};">
+                            ${secrets.length}
+                        </div>
+                        <div class="insight-label">Potential Secrets</div>
+                    </div>
+                    <div class="insight-card">
+                        <div class="insight-value" style="color: ${vulnerabilities.length > 0 ? '#da3633' : '#3fb950'};">
+                            ${vulnerabilities.length}
+                        </div>
+                        <div class="insight-label">Known Vulnerabilities</div>
+                    </div>
+                </div>
+            </div>
+
+            ${secrets.length > 0 ? `
                 <div class="section">
-                    <h3 class="section-title">Security Analysis</h3>
-                    ${data.security.length > 0 ?
-                data.security.map(issue => `
+                    <h3 class="section-title">Exposed Secrets Detection</h3>
+                    
+                    <div id="visible-secrets">
+                        ${secrets.slice(0, 3).map(secret => `
+                            <div class="security-alert ${secret.severity}">
+                                <div class="security-alert-title">
+                                    ${secret.severity.toUpperCase()} - ${secret.type}
+                                </div>
+                                <div class="security-alert-desc">
+                                    Found in: ${secret.file}
+                                </div>
+                                <div style="margin-top: 6px; font-size: 11px; color: #8b949e;">
+                                    Location: ${secret.line}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    
+                    ${secrets.length > 3 ? `
+                        <div id="hidden-secrets" style="display: none;">
+                            ${secrets.slice(3).map(secret => `
+                                <div class="expandable-item security-alert ${secret.severity}">
+                                    <div class="security-alert-title">
+                                        ${secret.severity.toUpperCase()} - ${secret.type}
+                                    </div>
+                                    <div class="security-alert-desc">
+                                        Found in: ${secret.file}
+                                    </div>
+                                    <div style="margin-top: 6px; font-size: 11px; color: #8b949e;">
+                                        Location: ${secret.line}
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        
+                        <button class="btn-secondary" id="toggle-secrets" style="width: 100%; margin-top: 8px; margin-bottom: 12px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                            <span class="btn-text">Show ${secrets.length - 3} More</span>
+                            <span class="arrow-icon" style="transition: transform 0.2s;">▼</span>
+                        </button>
+                    ` : ''}
+                    
+                    <div style="background: rgba(218, 54, 51, 0.1); border: 1px solid rgba(218, 54, 51, 0.3); border-radius: 6px; padding: 10px; margin-top: 12px;">
+                        <div style="font-size: 11px; color: #8b949e; line-height: 1.6;">
+                            <strong style="color: #da3633;">Action Required:</strong><br>
+                            Rotate all exposed credentials immediately<br>
+                            Add files to .gitignore<br>
+                            Use environment variables or secret managers<br>
+                            Review git history for leaked secrets
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+
+            ${vulnerabilities.length > 0 ? `
+                <div class="section">
+                    <h3 class="section-title">Dependency Vulnerabilities</h3>
+                    ${vulnerabilities.map(vuln => `
+                        <div class="security-alert high">
+                            <div class="security-alert-title">
+                                ${vuln.cve} - ${vuln.package}
+                            </div>
+                            <div class="security-alert-desc">
+                                ${vuln.description}
+                            </div>
+                            <div style="margin-top: 6px; display: flex; justify-content: space-between; align-items: center;">
+                                <div style="font-size: 11px; color: #8b949e;">
+                                    Current version: ${vuln.version}
+                                </div>
+                                <a href="https://nvd.nist.gov/vuln/detail/${vuln.cve}" 
+                                   target="_blank" 
+                                   style="font-size: 11px; color: #58a6ff; text-decoration: none;">
+                                    View Details
+                                </a>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            ` : ''}
+
+            ${allIssues.length > 0 ? `
+                <div class="section">
+                    <h3 class="section-title">Security Issues</h3>
+                    
+                    <div id="visible-security-issues">
+                        ${allIssues.slice(0, 3).map(issue => `
                             <div class="security-alert ${issue.severity}">
                                 <div class="security-alert-title">
-                                    ${issue.severity.toUpperCase()} - ${issue.title}
+                                    ${issue.severity.toUpperCase()} - ${issue.title || issue.type}
                                 </div>
                                 <div class="security-alert-desc">${issue.description}</div>
                                 ${issue.files ? `
@@ -1982,18 +3762,57 @@
                                     </div>
                                 ` : ''}
                             </div>
-                        `).join('')
-                : `
-                            <div style="background: rgba(63, 185, 80, 0.1); border: 1px solid #3fb950; border-radius: 6px; padding: 12px; text-align: center; color: #3fb950;">
-                                No security issues detected
-                            </div>
-                        `
-            }
+                        `).join('')}
+                    </div>
+                    
+                    ${allIssues.length > 3 ? `
+                        <div id="hidden-security-issues" style="display: none;">
+                            ${allIssues.slice(3).map(issue => `
+                                <div class="expandable-item security-alert ${issue.severity}">
+                                    <div class="security-alert-title">
+                                        ${issue.severity.toUpperCase()} - ${issue.title || issue.type}
+                                    </div>
+                                    <div class="security-alert-desc">${issue.description}</div>
+                                    ${issue.files ? `
+                                        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #30363d;">
+                                            ${issue.files.map(file => `
+                                                <div style="color: #8b949e; font-size: 11px; font-family: monospace; margin-top: 4px;">
+                                                    ${file}
+                                                </div>
+                                            `).join('')}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                        
+                        <button class="btn-secondary" id="toggle-security-issues" style="width: 100%; margin-top: 8px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+                            <span class="btn-text">Show ${allIssues.length - 3} More</span>
+                            <span class="arrow-icon" style="transition: transform 0.2s;">▼</span>
+                        </button>
+                    ` : ''}
                 </div>
-                ${renderSecurityChecklist(data.files)}
-            </div>
-        `;
-    }
+            ` : ''}
+
+            ${secrets.length === 0 && vulnerabilities.length === 0 && allIssues.length === 0 ? `
+                <div class="section">
+                    <div style="background: rgba(63, 185, 80, 0.1); border: 1px solid #3fb950; border-radius: 6px; padding: 20px; text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 12px;">✓</div>
+                        <div style="color: #3fb950; font-size: 16px; font-weight: 600; margin-bottom: 8px;">
+                            No Critical Issues Detected
+                        </div>
+                        <div style="color: #8b949e; font-size: 12px;">
+                            Your repository follows basic security best practices
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+
+            ${renderSecurityChecklist(data.files)}
+            ${renderSecurityRecommendations()}
+        </div>
+    `;
+}
 
     function renderSecurityChecklist(files) {
         const checks = [
@@ -2018,6 +3837,246 @@
                         </div>
                     `).join('')}
                 </div>
+            </div>
+        `;
+    }
+
+    function analyzeDocumentationGaps(files, data) {
+        const gaps = {
+            missingReadme: false,
+            shortReadme: false,
+            noContributing: false,
+            noChangelog: false,
+            noLicense: false,
+            noApiDocs: false,
+            undocumentedFiles: [],
+            totalFiles: 0,
+            documentedFiles: 0,
+            score: 100
+        };
+
+        const readme = files.find(f => f.path.toLowerCase() === 'readme.md');
+        const contributing = files.find(f => f.path.toLowerCase() === 'contributing.md');
+        const changelog = files.find(f => f.path.toLowerCase() === 'changelog.md');
+        const license = files.find(f => f.path.toLowerCase().includes('license'));
+
+        if (!readme) {
+            gaps.missingReadme = true;
+            gaps.score -= 30;
+        } else if (readme.size < 1000) {
+            gaps.shortReadme = true;
+            gaps.score -= 15;
+        }
+
+        if (!contributing) {
+            gaps.noContributing = true;
+            gaps.score -= 10;
+        }
+
+        if (!changelog) {
+            gaps.noChangelog = true;
+            gaps.score -= 10;
+        }
+
+        if (!license) {
+            gaps.noLicense = true;
+            gaps.score -= 15;
+        }
+
+        const codeFiles = files.filter(f =>
+            f.path.match(/\.(js|jsx|ts|tsx|py|dart|rs|go|java)$/i) &&
+            !f.path.includes('test') &&
+            !f.path.includes('spec') &&
+            !f.path.includes('node_modules')
+        );
+
+        const apiFiles = codeFiles.filter(f =>
+            f.path.includes('api') ||
+            f.path.includes('controller') ||
+            f.path.includes('route')
+        );
+
+        if (apiFiles.length > 0) {
+            const apiDocs = files.filter(f =>
+                f.path.includes('swagger') ||
+                f.path.includes('openapi') ||
+                f.path.toLowerCase().includes('api.md')
+            );
+
+            if (apiDocs.length === 0) {
+                gaps.noApiDocs = true;
+                gaps.score -= 20;
+            }
+        }
+
+        const publicFolders = ['src', 'lib', 'app', 'api'];
+        const publicFiles = codeFiles.filter(f =>
+            publicFolders.some(folder => f.path.startsWith(folder + '/'))
+        );
+
+        gaps.totalFiles = publicFiles.length;
+
+        publicFiles.forEach(file => {
+            const hasDoc = files.some(docFile => {
+                const baseName = file.path.replace(/\.[^.]+$/, '');
+                return docFile.path.startsWith(baseName) &&
+                    docFile.path.match(/\.(md|txt|rst)$/i);
+            });
+
+            if (!hasDoc) {
+                gaps.undocumentedFiles.push(file.path);
+            } else {
+                gaps.documentedFiles++;
+            }
+        });
+
+        if (gaps.totalFiles > 0) {
+            const docRatio = gaps.documentedFiles / gaps.totalFiles;
+            if (docRatio < 0.3) {
+                gaps.score -= 20;
+            } else if (docRatio < 0.6) {
+                gaps.score -= 10;
+            }
+        }
+
+        gaps.score = Math.max(0, gaps.score);
+        return gaps;
+    }
+
+    function generateMermaidDiagram(data) {
+        const categories = data.categorized;
+        let diagram = 'graph TD\n';
+
+        diagram += '    Root[Repository]\n';
+
+        if (categories.frontend.length > 0) {
+            diagram += '    Root --> Frontend[Frontend]\n';
+            const topFrontend = categories.frontend.slice(0, 3);
+            topFrontend.forEach((file, idx) => {
+                const name = file.path.split('/').pop().replace(/\./g, '_');
+                diagram += `    Frontend --> F${idx}[${name}]\n`;
+            });
+        }
+
+        if (categories.backend.length > 0) {
+            diagram += '    Root --> Backend[Backend]\n';
+            const topBackend = categories.backend.slice(0, 3);
+            topBackend.forEach((file, idx) => {
+                const name = file.path.split('/').pop().replace(/\./g, '_');
+                diagram += `    Backend --> B${idx}[${name}]\n`;
+            });
+        }
+
+        if (categories.config.length > 0) {
+            diagram += '    Root --> Config[Configuration]\n';
+            const topConfig = categories.config.slice(0, 3);
+            topConfig.forEach((file, idx) => {
+                const name = file.path.split('/').pop().replace(/\./g, '_');
+                diagram += `    Config --> C${idx}[${name}]\n`;
+            });
+        }
+
+        if (categories.tests.length > 0) {
+            diagram += '    Root --> Tests[Tests]\n';
+        }
+
+        if (categories.docs.length > 0) {
+            diagram += '    Root --> Docs[Documentation]\n';
+        }
+
+        diagram += '\n    classDef frontend fill:#61dafb\n';
+        diagram += '    classDef backend fill:#3fb950\n';
+        diagram += '    classDef config fill:#d29922\n';
+        diagram += '    class Frontend frontend\n';
+        diagram += '    class Backend backend\n';
+        diagram += '    class Config config\n';
+
+        return diagram;
+    }
+
+    function generateDetailedMermaid(data) {
+        let diagram = 'graph LR\n';
+
+        const folders = {};
+        data.files.forEach(file => {
+            const parts = file.path.split('/');
+            if (parts.length > 1) {
+                const folder = parts[0];
+                if (!folders[folder]) folders[folder] = [];
+                folders[folder].push(file);
+            }
+        });
+
+        Object.entries(folders).slice(0, 5).forEach(([folder, files]) => {
+            const safeFolder = folder.replace(/[^a-zA-Z0-9]/g, '_');
+            diagram += `    ${safeFolder}[${folder}]\n`;
+
+            files.slice(0, 3).forEach((file, idx) => {
+                const fileName = file.path.split('/').pop();
+                const safeName = fileName.replace(/[^a-zA-Z0-9]/g, '_');
+                diagram += `    ${safeFolder} --> ${safeFolder}_${idx}[${fileName}]\n`;
+            });
+        });
+
+        return diagram;
+    }
+
+    function renderDocumentationGapsSection(gaps) {
+        return `
+            <div class="section">
+                <h3 class="section-title">Documentation Analysis</h3>
+                
+                <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; text-align: center; margin-bottom: 16px;">
+                    <div style="font-size: 12px; color: #8b949e; margin-bottom: 8px;">Documentation Score</div>
+                    <div style="font-size: 48px; font-weight: 700; color: ${gaps.score >= 80 ? '#3fb950' : gaps.score >= 60 ? '#58a6ff' : gaps.score >= 40 ? '#d29922' : '#da3633'}; line-height: 1;">
+                        ${gaps.score}
+                    </div>
+                    <div style="font-size: 14px; color: #8b949e; margin-top: 4px;">
+                        ${gaps.score >= 80 ? 'Excellent' : gaps.score >= 60 ? 'Good' : gaps.score >= 40 ? 'Fair' : 'Needs Work'}
+                    </div>
+                </div>
+    
+                ${gaps.missingReadme || gaps.shortReadme || gaps.noContributing || gaps.noChangelog || gaps.noLicense || gaps.noApiDocs ? `
+                    <div style="background: rgba(210, 153, 34, 0.1); border: 1px solid rgba(210, 153, 34, 0.3); border-radius: 6px; padding: 12px; margin-bottom: 12px;">
+                        <div style="font-size: 12px; font-weight: 600; color: #d29922; margin-bottom: 10px;">
+                            Missing Documentation
+                        </div>
+                        <div style="font-size: 11px; color: #8b949e; line-height: 1.8;">
+                            ${gaps.missingReadme ? 'Add README.md to describe the project<br>' : ''}
+                            ${gaps.shortReadme ? 'Expand README.md with more details<br>' : ''}
+                            ${gaps.noContributing ? 'Add CONTRIBUTING.md for contributor guidelines<br>' : ''}
+                            ${gaps.noChangelog ? 'Add CHANGELOG.md to track changes<br>' : ''}
+                            ${gaps.noLicense ? 'Add LICENSE file for legal clarity<br>' : ''}
+                            ${gaps.noApiDocs ? 'Add API documentation (Swagger/OpenAPI)' : ''}
+                        </div>
+                    </div>
+                ` : ''}
+    
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;">
+                        <div style="font-size: 11px; color: #8b949e; margin-bottom: 6px;">Total Files</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #c9d1d9;">${gaps.totalFiles}</div>
+                    </div>
+                    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;">
+                        <div style="font-size: 11px; color: #8b949e; margin-bottom: 6px;">Documented</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #3fb950;">${gaps.documentedFiles}</div>
+                    </div>
+                </div>
+    
+                ${gaps.undocumentedFiles.length > 0 ? `
+                    <div style="margin-top: 12px;">
+                        <div style="font-size: 12px; font-weight: 600; color: #c9d1d9; margin-bottom: 8px;">
+                            Files Needing Documentation (showing ${Math.min(5, gaps.undocumentedFiles.length)} of ${gaps.undocumentedFiles.length})
+                        </div>
+                        ${gaps.undocumentedFiles.slice(0, 5).map(file => `
+                            <div style="background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 8px; margin-bottom: 6px;">
+                                <div style="font-size: 11px; color: #8b949e; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                    ${file}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                ` : ''}
             </div>
         `;
     }
@@ -2097,102 +4156,102 @@
 
     function renderAboutTab() {
         return `
-            <div class="tab-content" id="tab-about">
-                <div class="section">
-                    <div style="text-align: center; padding: 20px 0;">
-                        <img src="${chrome.runtime.getURL('icons/logo64light.png')}" 
-                             alt="GitNav Logo" s
-                             style="width: 64px; height: 64px; border-radius: 12px; margin-bottom: 12px;" />
-                        <h2 style="font-size: 24px; font-weight: 700; color: #c9d1d9; margin: 0 0 8px 0;">GitNav</h2>
-                        <div style="color: #8b949e; font-size: 13px; margin-bottom: 20px;">Version 1.0.0</div>
-                    </div>
-
-                    <div class="stat-box">
-                        <div style="color: #c9d1d9; font-size: 14px; line-height: 1.8; text-align: center;">
-                            Navigate GitHub repositories with powerful analytics, 
-                            interactive visualizations, and smart insights.
-                        </div>
-                    </div>
+        <div class="tab-content" id="tab-about">
+            <div class="section">
+                <div style="text-align: center; padding: 20px 0;">
+                    <img src="${chrome.runtime.getURL('icons/logo64light.png')}" 
+                         alt="GitNav Logo" 
+                         style="width: 64px; height: 64px; border-radius: 12px; margin-bottom: 12px;" />
+                    <h2 style="font-size: 24px; font-weight: 700; color: #c9d1d9; margin: 0 0 8px 0;">GitNav</h2>
+                    <div style="color: #8b949e; font-size: 13px; margin-bottom: 20px;">Version 2.0.0</div>
                 </div>
 
-                <div class="section">
-                    <h3 class="section-title">Created By</h3>
-                    <div class="stat-box">
-                        <div style="text-align: center; padding: 12px;">
-                            <div style="font-size: 18px; font-weight: 600; color: #58a6ff; margin-bottom: 4px;">
-                                Varun Karamchandani
-                            </div>
-                            <div style="color: #8b949e; font-size: 13px; margin-bottom: 12px;">
-                                Computer Science Student @ SUNY Binghamton University
-                            </div>
-                            <div style="display: flex; gap: 12px; justify-content: center; margin-top: 16px; flex-wrap: wrap;">
-                                <a href="https://github.com/SELESTER11" target="_blank" 
-                                   style="color: #58a6ff; text-decoration: none; font-size: 13px;">
-                                   GitHub →
-                                </a>
-                                <a href="https://linkedin.com/in/varunkkc" target="_blank" 
-                                   style="color: #58a6ff; text-decoration: none; font-size: 13px;">
-                                   LinkedIn →
-                                </a>
-                                <a href="https://my-portfolio-v4-three.vercel.app/" target="_blank" 
-                                   style="color: #58a6ff; text-decoration: none; font-size: 13px;">
-                                   Portfolio →
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h3 class="section-title">Features</h3>
-                    <div style="color: #8b949e; font-size: 13px; line-height: 2;">
-                        ✓ Interactive force-directed repository visualization<br>
-                        ✓ File tree explorer with instant search<br>
-                        ✓ Dependency analysis for multiple languages<br>
-                        ✓ Code metrics and complexity scoring<br>
-                        ✓ Security vulnerability detection<br>
-                        ✓ Technology stack identification<br>
-                        ✓ Repository health scoring<br>
-                        ✓ Private repository support with GitHub tokens<br>
-                        ✓ Export analysis as JSON or Markdown
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h3 class="section-title">Privacy & Data</h3>
-                    <div class="stat-box">
-                        <div style="color: #8b949e; font-size: 12px; line-height: 1.6;">
-                            <strong style="color: #c9d1d9;">Your privacy matters:</strong><br>
-                            • All data stays local in your browser<br>
-                            • GitHub tokens stored securely in Chrome storage<br>
-                            • No analytics or tracking<br>
-                            • No data sent to external servers<br>
-                            • Open source - inspect the code yourself
-                        </div>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <h3 class="section-title">Support & Contribute</h3>
-                    <div style="display: grid; gap: 10px;">
-                        <button class="btn-primary" onclick="window.open('https://github.com/SELESTER11/GitNav', '_blank')">
-                            Star on GitHub
-                        </button>
-                        <button class="btn-secondary" onclick="window.open('https://github.com/SELESTER11/GitNav/issues', '_blank')" 
-                                style="width: 100%; margin: 0;">
-                            Report an Issue
-                        </button>
-                    </div>
-                </div>
-
-                <div class="section">
-                    <div style="text-align: center; color: #8b949e; font-size: 11px; padding: 20px 0;">
-                        Made with ❤️ by Varun Karamchandani<br>
-                        Licensed under MIT License
+                <div class="stat-box">
+                    <div style="color: #c9d1d9; font-size: 14px; line-height: 1.8; text-align: center;">
+                        Navigate GitHub repositories with powerful analytics, 
+                        interactive visualizations, and smart insights.
                     </div>
                 </div>
             </div>
-        `;
+
+            <div class="section">
+                <h3 class="section-title">Created By</h3>
+                <div class="stat-box">
+                    <div style="text-align: center; padding: 12px;">
+                        <div style="font-size: 18px; font-weight: 600; color: #58a6ff; margin-bottom: 4px;">
+                            Varun Karamchandani
+                        </div>
+                        <div style="color: #8b949e; font-size: 13px; margin-bottom: 12px;">
+                            Computer Science Student @ SUNY Binghamton University
+                        </div>
+                        <div style="display: flex; gap: 12px; justify-content: center; margin-top: 16px; flex-wrap: wrap;">
+                            <a href="https://github.com/SELESTER11" target="_blank" 
+                               style="color: #58a6ff; text-decoration: none; font-size: 13px;">
+                               GitHub →
+                            </a>
+                            <a href="https://linkedin.com/in/varunkkc" target="_blank" 
+                               style="color: #58a6ff; text-decoration: none; font-size: 13px;">
+                               LinkedIn →
+                            </a>
+                            <a href="https://my-portfolio-v4-three.vercel.app/" target="_blank" 
+                               style="color: #58a6ff; text-decoration: none; font-size: 13px;">
+                               Portfolio →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3 class="section-title">Features</h3>
+                <div style="color: #8b949e; font-size: 13px; line-height: 2;">
+                    ✓ Interactive force-directed repository visualization<br>
+                    ✓ File tree explorer with instant search<br>
+                    ✓ Dependency analysis for multiple languages<br>
+                    ✓ Code metrics and complexity scoring<br>
+                    ✓ Security vulnerability detection<br>
+                    ✓ Technology stack identification<br>
+                    ✓ Repository health scoring<br>
+                    ✓ Private repository support with GitHub tokens<br>
+                    ✓ Export analysis as JSON or Markdown
+                </div>
+            </div>
+
+            <div class="section">
+                <h3 class="section-title">Privacy & Data</h3>
+                <div class="stat-box">
+                    <div style="color: #8b949e; font-size: 12px; line-height: 1.6;">
+                        <strong style="color: #c9d1d9;">Your privacy matters:</strong><br>
+                        • All data stays local in your browser<br>
+                        • GitHub tokens stored locally on your device<br>
+                        • No analytics or tracking<br>
+                        • No data sent to external servers<br>
+                        • Open source - inspect the code yourself
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3 class="section-title">Support & Contribute</h3>
+                <div style="display: grid; gap: 10px;">
+                    <button class="btn-primary" onclick="window.open('https://github.com/SELESTER11/GitNav', '_blank')">
+                        Star on GitHub
+                    </button>
+                    <button class="btn-secondary" onclick="window.open('https://github.com/SELESTER11/GitNav/issues', '_blank')" 
+                            style="width: 100%; margin: 0;">
+                        Report an Issue
+                    </button>
+                </div>
+            </div>
+
+            <div class="section">
+                <div style="text-align: center; color: #8b949e; font-size: 11px; padding: 20px 0;">
+                    Made with ❤️ by Varun Karamchandani<br>
+                    Licensed under MIT License
+                </div>
+            </div>
+        </div>
+    `;
     }
 
     function renderCloneSection(owner, repo) {
@@ -2221,15 +4280,8 @@
                     <div style="color: #8b949e; font-size: 12px; margin-bottom: 6px;">Clone repository</div>
                     <div style="font-family: monospace; font-size: 12px; color: #c9d1d9; display: flex; justify-content: space-between; align-items: center;">
                         <span>git clone https://github.com/${owner}/${repo}.git</span>
-                        <button class="copy-btn" onclick="copyToClipboard('git clone https://github.com/${owner}/${repo}.git')">Copy</button>
+                        <button class="copy-btn" data-copy="git clone https://github.com/${owner}/${repo}.git">Copy</button>
                     </div>
-                </div>
-                
-                <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 12px;">
-                    <div style="color: #8b949e; font-size: 12px; margin-bottom: 6px;">View on GitHub</div>
-                    <button class="btn-primary" onclick="window.open('https://github.com/${owner}/${repo}', '_blank')">
-                        Open Repository
-                    </button>
                 </div>
                 
                 <div style="background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;">
@@ -2247,8 +4299,20 @@
             <div class="section">
                 <h3 class="section-title">Export Analysis</h3>
                 <div class="export-options">
-                    <button class="btn-secondary export-btn" id="export-json-btn">Export as JSON</button>
-                    <button class="btn-secondary export-btn" id="export-md-btn">Export as Markdown</button>
+                    <button class="btn-secondary export-btn" id="export-json-btn">Export JSON</button>
+                    <button class="btn-secondary export-btn" id="export-md-btn">Export Markdown</button>
+                </div>
+                <div style="margin-top: 12px;">
+                    <div style="font-size: 12px; font-weight: 600; color: #c9d1d9; margin-bottom: 8px;">
+                        Mermaid Diagrams
+                    </div>
+                    <div class="export-options">
+                        <button class="btn-secondary export-btn" id="export-mermaid-btn">Basic Diagram</button>
+                        <button class="btn-secondary export-btn" id="export-mermaid-detailed-btn">Detailed Diagram</button>
+                    </div>
+                    <div style="font-size: 10px; color: #8b949e; margin-top: 6px; line-height: 1.5;">
+                        Mermaid files can be viewed in GitHub, VSCode, or at mermaid.live
+                    </div>
                 </div>
             </div>
         `;
@@ -2267,7 +4331,6 @@
         const width = 468;
         const height = 600;
 
-        // Physics constants
         const PHYSICS = {
             centerForce: 0.002,
             collisionForce: 0.8,
@@ -2283,6 +4346,7 @@
         let scale = 1;
         let translateX = 0;
         let translateY = 0;
+        let animationFrameId = null;
         let isDragging = false;
         let dragStartX = 0;
         let dragStartY = 0;
@@ -2293,7 +4357,6 @@
         const links = [];
         const folderMap = new Map();
 
-        // Create root node
         const root = {
             id: 'root',
             name: 'Repository',
@@ -2308,7 +4371,6 @@
         nodes.push(root);
         folderMap.set('root', root);
 
-        // Group files by folder
         const validFiles = files.filter(f => f.size > 0).slice(0, CONFIG.MAX_FILES_IN_GRAPH);
         const folderFiles = new Map();
 
@@ -2319,7 +4381,6 @@
             folderFiles.get(firstFolder).push(file);
         });
 
-        // Create folder nodes in a circle around root
         const folderEntries = Array.from(folderFiles.entries()).filter(([name]) => name !== 'root');
         const folderRadius = 180;
 
@@ -2348,7 +4409,6 @@
             });
         });
 
-        // Create file nodes in circles around their folders
         validFiles.forEach((file) => {
             const parts = file.path.split('/');
             const fileName = parts.pop();
@@ -2403,7 +4463,6 @@
                 node.vx += (centerX - node.x) * PHYSICS.centerForce;
                 node.vy += (centerY - node.y) * PHYSICS.centerForce;
 
-                // Repulsion forces
                 nodes.forEach((other, j) => {
                     if (i === j) return;
 
@@ -2422,14 +4481,13 @@
                     node.vy += fy;
                 });
 
-                // Collision detection - THIS IS THE KEY PART
                 nodes.forEach((other, j) => {
                     if (i >= j) return;
 
                     const dx = node.x - other.x;
                     const dy = node.y - other.y;
                     const dist = Math.sqrt(dx * dx + dy * dy);
-                    const minDist = node.r + other.r + 10; // 10px spacing
+                    const minDist = node.r + other.r + 10;
 
                     if (dist < minDist && dist > 0) {
                         const force = (minDist - dist) * PHYSICS.collisionForce;
@@ -2448,7 +4506,6 @@
                 });
             });
 
-            // Link forces
             links.forEach(link => {
                 const source = link.source;
                 const target = link.target;
@@ -2477,7 +4534,6 @@
                 }
             });
 
-            // Apply velocities
             nodes.forEach(node => {
                 if (node.fixed || node === dragNode) return;
 
@@ -2498,8 +4554,6 @@
             temperature = Math.max(0.1, temperature);
         }
 
-        let frameCount = 0;
-        let stableFrames = 0;
 
         function draw() {
             const vizTab = document.querySelector('#tab-visualize');
@@ -2507,37 +4561,20 @@
                 setTimeout(() => requestAnimationFrame(draw), 500);
                 return;
             }
-
-            let maxVelocity = 0;
-            nodes.forEach(node => {
-                const velocity = Math.abs(node.vx) + Math.abs(node.vy);
-                if (velocity > maxVelocity) maxVelocity = velocity;
-            });
-
-            if (maxVelocity < 0.01 && temperature < 0.15) {
-                stableFrames++;
-                if (stableFrames > 60) {
-                    setTimeout(() => requestAnimationFrame(draw), 500);
-                    return;
-                }
-            } else {
-                stableFrames = 0;
-            }
-
+        
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.clearRect(0, 0, width, height);
             ctx.translate(translateX * scale, translateY * scale);
             ctx.scale(scale, scale);
-
-            // Draw links
+        
             links.forEach(link => {
                 const source = link.source;
                 const target = link.target;
-
+        
                 const gradient = ctx.createLinearGradient(source.x, source.y, target.x, target.y);
                 gradient.addColorStop(0, source.color + '40');
                 gradient.addColorStop(1, target.color + '40');
-
+        
                 ctx.strokeStyle = gradient;
                 ctx.lineWidth = 1.5 / scale;
                 ctx.beginPath();
@@ -2545,8 +4582,7 @@
                 ctx.lineTo(target.x, target.y);
                 ctx.stroke();
             });
-
-            // Draw nodes
+        
             nodes.forEach(node => {
                 if (node === hoverNode) {
                     ctx.shadowBlur = 15;
@@ -2554,12 +4590,12 @@
                 } else {
                     ctx.shadowBlur = 0;
                 }
-
+        
                 ctx.fillStyle = node.color;
                 ctx.beginPath();
                 ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
                 ctx.fill();
-
+        
                 if (node === hoverNode) {
                     ctx.strokeStyle = '#ffffff';
                     ctx.lineWidth = 2 / scale;
@@ -2569,32 +4605,33 @@
                     ctx.lineWidth = 1 / scale;
                     ctx.stroke();
                 }
-
+        
                 ctx.shadowBlur = 0;
-
+        
                 if (node.r > 10 || node === hoverNode || node.type !== 'file') {
                     ctx.fillStyle = '#ffffff';
                     ctx.font = `${Math.max(9, node.r)}px -apple-system, sans-serif`;
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'top';
-
+        
                     const maxLength = node.type === 'file' ? 12 : 18;
                     const displayName = node.name.length > maxLength
                         ? node.name.substring(0, maxLength - 1) + '…'
                         : node.name;
-
+        
                     const textWidth = ctx.measureText(displayName).width;
                     ctx.fillStyle = 'rgba(13, 17, 23, 0.9)';
                     ctx.fillRect(node.x - textWidth / 2 - 3, node.y + node.r + 3, textWidth + 6, 14);
-
+        
                     ctx.fillStyle = '#ffffff';
                     ctx.fillText(displayName, node.x, node.y + node.r + 5);
                 }
             });
-
+        
             simulate();
-            requestAnimationFrame(draw);
+            animationFrameId = requestAnimationFrame(draw);
         }
+        
 
         function worldToScreen(x, y) {
             return {
@@ -2702,7 +4739,7 @@
 
         canvas.onclick = (e) => {
             if (hoverNode && hoverNode.type === 'file') {
-                window.open(`https://github.com/${owner}/${repo}/blob/main/${hoverNode.path}`, '_blank');
+                window.open(`https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${hoverNode.path}`, '_blank');
             } else if (hoverNode && (hoverNode.type === 'folder' || hoverNode.type === 'root')) {
                 const targetScale = 1.5;
                 scale = targetScale;
@@ -2712,6 +4749,41 @@
         };
 
         draw();
+
+        registerCleanup(() => {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+        });
+    }
+
+
+    function setupExpandableList(container, listId, visibleCount = 3) {
+        const toggleBtn = container.querySelector(`#toggle-${listId}`);
+        const hiddenSection = container.querySelector(`#hidden-${listId}`);
+        
+        if (!toggleBtn || !hiddenSection) return;
+        
+        let isExpanded = false;
+        
+        toggleBtn.addEventListener('click', () => {
+            isExpanded = !isExpanded;
+            
+            const arrow = toggleBtn.querySelector('.arrow-icon');
+            const text = toggleBtn.querySelector('.btn-text');
+            
+            if (isExpanded) {
+                hiddenSection.style.display = 'block';
+                text.textContent = 'Show Less';
+                if (arrow) arrow.style.transform = 'rotate(180deg)';
+            } else {
+                hiddenSection.style.display = 'none';
+                const hiddenCount = hiddenSection.querySelectorAll('.expandable-item').length;
+                text.textContent = `Show ${hiddenCount} More`;
+                if (arrow) arrow.style.transform = 'rotate(0deg)';
+            }
+        });
     }
 
 
@@ -2739,23 +4811,190 @@
         });
     }
 
-    function setupTabSwitching(sidebar) {
+    function setupLargeFilesToggle(container) {
+        const toggleBtn = container.querySelector('#toggle-large-files');
+        const hiddenFiles = container.querySelector('#large-files-hidden');
+
+        if (!toggleBtn || !hiddenFiles) return;
+
+        let isExpanded = false;
+
+        toggleBtn.addEventListener('click', () => {
+            isExpanded = !isExpanded;
+
+            const arrow = toggleBtn.querySelector('span:last-child');
+            const text = toggleBtn.querySelector('span:first-child');
+
+            if (isExpanded) {
+                hiddenFiles.style.display = 'block';
+                text.textContent = 'Show Less';
+                arrow.style.transform = 'rotate(180deg)';
+            } else {
+                hiddenFiles.style.display = 'none';
+                const hiddenCount = hiddenFiles.querySelectorAll('.file-item').length;
+                text.textContent = `Show ${hiddenCount} More`;
+                arrow.style.transform = 'rotate(0deg)';
+            }
+        });
+    }
+
+    function setupTabSwitching(sidebar, owner, repo) {
         sidebar.querySelectorAll('.nav-tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 sidebar.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
                 sidebar.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
                 tab.classList.add('active');
                 const targetTab = sidebar.querySelector(`#tab-${tab.dataset.tab}`);
-                if (targetTab) targetTab.classList.add('active');
+                if (targetTab) {
+                    targetTab.classList.add('active');
+                }
             });
         });
     }
 
     function setupFileClickHandlers(container, owner, repo) {
         container.querySelectorAll('[data-path]').forEach(el => {
-            el.addEventListener('click', () => {
-                const path = el.getAttribute('data-path');
-                window.open(`https://github.com/${owner}/${repo}/blob/main/${path}`, '_blank');
+            const path = el.getAttribute('data-path');
+    
+            el.addEventListener('click', async (e) => {
+                // Don't open GitHub if clicking on buttons or links inside
+                if (e.target.closest('button') || e.target.closest('a')) {
+                    return;
+                }
+    
+                // Check if related files already showing
+                const existing = el.querySelector('.file-recommendations');
+                if (existing) {
+                    existing.remove();
+                    return;
+                }
+    
+                // If it's a simple click without showing related files, open on GitHub
+                // Check if this is a tree-item (from tree tab) or regular file-item
+                const isTreeItem = el.classList.contains('tree-item');
+                const isFileItem = el.classList.contains('file-item');
+    
+                // For tree items, show related files
+                // For file items in other tabs, also show related files
+                if (isTreeItem || isFileItem) {
+                    const related = findRelatedFilesByStructure(path, globalData.files);
+    
+                    const recsDiv = document.createElement('div');
+                    recsDiv.className = 'file-recommendations';
+                    recsDiv.style.cssText = `
+                        margin-top: 12px;
+                        padding: 12px;
+                        background: rgba(88, 166, 255, 0.05);
+                        border: 1px solid rgba(88, 166, 255, 0.2);
+                        border-radius: 6px;
+                        width: 100%;
+                        box-sizing: border-box;
+                        flex-basis: 100%;
+                    `;
+    
+                    let content = '';
+    
+                    if (related.length > 0) {
+                        content += `
+                            <div style="font-size: 11px; font-weight: 600; color: #58a6ff; margin-bottom: 8px;">
+                                Related Files
+                            </div>
+                            ${related.map(r => `
+                                <div class="related-file-link" data-related-path="${r.file}" style="font-size: 11px; padding: 6px 0; cursor: pointer; color: #8b949e; display: flex; align-items: center; gap: 6px;">
+                                    <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${r.file.split('/').pop()}</span>
+                                    <span style="font-size: 10px; color: #484f58;">${r.type}</span>
+                                </div>
+                            `).join('')}
+                        `;
+                    }
+    
+                    content += `
+                        <button class="btn-secondary open-github-btn" style="width: 100%; margin-top: 8px; font-size: 11px; padding: 6px;">
+                            Open on GitHub
+                        </button>
+                        <button class="btn-secondary view-history-btn" style="width: 100%; margin-top: 8px; font-size: 11px; padding: 6px;">
+                            View File History
+                        </button>
+                        <div class="history-container" style="display: none; margin-top: 8px;"></div>
+                    `;
+    
+                    recsDiv.innerHTML = content;
+                    el.appendChild(recsDiv);
+    
+                    // Setup open on GitHub button - FIXED: Use globalDefaultBranch
+                    const openGithubBtn = recsDiv.querySelector('.open-github-btn');
+                    openGithubBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        window.open(`https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${path}`, '_blank');
+                    });
+    
+                    // Setup related file clicks - FIXED: Use globalDefaultBranch
+                    recsDiv.querySelectorAll('.related-file-link').forEach(link => {
+                        link.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const relatedPath = link.dataset.relatedPath;
+                            window.open(`https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${relatedPath}`, '_blank');
+                        });
+                    });
+    
+                    // Setup history button
+                    const historyBtn = recsDiv.querySelector('.view-history-btn');
+                    const historyContainer = recsDiv.querySelector('.history-container');
+    
+                    historyBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+    
+                        if (historyContainer.style.display === 'none') {
+                            historyBtn.textContent = 'Loading...';
+                            historyBtn.disabled = true;
+    
+                            const evolution = await analyzeFileEvolution(owner, repo, path);
+    
+                            if (evolution.length === 0) {
+                                historyContainer.innerHTML = `
+                                    <div style="font-size: 11px; color: #8b949e; text-align: center; padding: 8px;">
+                                        No history available
+                                    </div>
+                                `;
+                            } else {
+                                historyContainer.innerHTML = `
+                                    <div style="font-size: 11px; font-weight: 600; color: #c9d1d9; margin-bottom: 6px;">
+                                        Recent Changes (${evolution.length})
+                                    </div>
+                                    ${evolution.slice(0, 5).map(commit => {
+                                        return `
+                                            <div class="commit-link" data-url="${commit.url}" style="background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 6px; margin-bottom: 4px; cursor: pointer;">
+                                                <div style="font-size: 11px; color: #c9d1d9; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                    ${commit.message}
+                                                </div>
+                                                <div style="font-size: 10px; color: #8b949e;">
+                                                    ${commit.author} - ${new Date(commit.date).toLocaleDateString()}
+                                                </div>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                `;
+                                
+                                // Setup commit clicks
+                                historyContainer.querySelectorAll('.commit-link').forEach(commitLink => {
+                                    commitLink.addEventListener('click', (e) => {
+                                        e.stopPropagation();
+                                        window.open(commitLink.dataset.url, '_blank');
+                                    });
+                                });
+                            }
+    
+                            historyContainer.style.display = 'block';
+                            historyBtn.textContent = 'Hide History';
+                            historyBtn.disabled = false;
+                        } else {
+                            historyContainer.style.display = 'none';
+                            historyBtn.textContent = 'View File History';
+                        }
+                    });
+    
+                    e.stopPropagation();
+                }
             });
         });
     }
@@ -2777,40 +5016,298 @@
         });
     }
 
-    function setupSearchFunctionality(container, data, owner, repo) {
-        const searchInput = container.querySelector('#file-search');
-        const searchResults = container.querySelector('#search-results');
+    // REPLACE the setupSearchFunctionality function with this fixed version:
 
-        if (!searchInput || !searchResults) return;
+function setupSearchFunctionality(container, data, owner, repo) {
+    const activateBtn = container.querySelector('#activate-search-btn');
+    const searchInputContainer = container.querySelector('#search-input-container');
+    const searchResults = container.querySelector('#search-results');
+    const filterBtns = container.querySelectorAll('.search-filter-btn');
+    const typeFilter = container.querySelector('#file-type-filter');
+    const sizeFilter = container.querySelector('#file-size-filter');
 
-        searchInput.addEventListener('input', (e) => {
-            const query = e.target.value.toLowerCase().trim();
+    if (!searchResults || !activateBtn) return;
 
-            if (!query) {
-                searchResults.innerHTML = '';
-                return;
-            }
+    // Populate file type filter
+    const extensions = [...new Set(data.files
+        .map(f => f.path.split('.').pop().toLowerCase())
+        .filter(ext => ext && ext.length < 10)
+    )].sort();
 
-            const matches = data.files
-                .filter(f => f.path.toLowerCase().includes(query))
-                .slice(0, 30);
-
-            if (matches.length === 0) {
-                searchResults.innerHTML = '<div style="color: #8b949e; font-size: 13px; padding: 12px 0;">No files found matching your search</div>';
-                return;
-            }
-
-            searchResults.innerHTML = `
-          <div style="color: #8b949e; font-size: 12px; margin-bottom: 12px;">Found ${matches.length} file${matches.length !== 1 ? 's' : ''}</div>
-          ${matches.map(file => `
-            <div class="file-item" onclick="window.open('https://github.com/${owner}/${repo}/blob/main/${file.path}', '_blank')">
-              <div class="file-name">${file.path.split('/').pop()}</div>
-              <div class="file-path">${file.path}</div>
-            </div>
-          `).join('')}
-        `;
+    if (typeFilter) {
+        extensions.forEach(ext => {
+            const option = document.createElement('option');
+            option.value = ext;
+            option.textContent = `.${ext}`;
+            typeFilter.appendChild(option);
         });
     }
+
+    let currentFilter = 'all';
+    let currentTypeFilter = '';
+    let currentSizeFilter = '';
+    let searchActivated = false;
+    let userHasTyped = false;
+    let activeInput = null;
+
+    // Only show input when button is clicked
+    activateBtn.addEventListener('click', () => {
+        searchActivated = true;
+        userHasTyped = false;
+        activateBtn.style.display = 'none';
+        searchInputContainer.style.display = 'block';
+        
+        // CRITICAL FIX: Create input with maximum autofill prevention
+        const newInput = document.createElement('input');
+        newInput.type = 'text';
+        newInput.className = 'search-input';
+        newInput.id = 'search-' + Math.random().toString(36).substr(2, 9); // Random unique ID
+        newInput.name = 'search-' + Date.now(); // Random unique name
+        
+        // NUCLEAR OPTION: All possible autofill prevention attributes
+        newInput.setAttribute('autocomplete', 'off');
+        newInput.setAttribute('autocorrect', 'off');
+        newInput.setAttribute('autocapitalize', 'off');
+        newInput.setAttribute('spellcheck', 'false');
+        newInput.setAttribute('data-form-type', 'other'); // Tells browser this isn't a form
+        newInput.setAttribute('data-lpignore', 'true'); // LastPass ignore
+        newInput.setAttribute('data-1p-ignore', 'true'); // 1Password ignore
+        newInput.setAttribute('aria-autocomplete', 'none');
+        newInput.placeholder = 'Type to search files...';
+        newInput.value = '';
+        newInput.readOnly = true; // Start as readonly
+        
+        // Clear container and add new input
+        searchInputContainer.innerHTML = '';
+        searchInputContainer.appendChild(newInput);
+        
+        activeInput = newInput;
+        
+        // AGGRESSIVE CLEAR: Monitor for autofill every 10ms for 2 seconds
+        let clearAttempts = 0;
+        const maxAttempts = 200; // 2 seconds worth
+        const aggressiveClear = setInterval(() => {
+            // If input has value but user hasn't typed, clear it
+            if (!userHasTyped && newInput.value) {
+                newInput.value = '';
+            }
+            
+            clearAttempts++;
+            if (clearAttempts >= maxAttempts) {
+                clearInterval(aggressiveClear);
+            }
+        }, 10);
+        
+        // DELAYED ACTIVATION: Make input functional after 500ms
+        setTimeout(() => {
+            newInput.readOnly = false;
+            
+            // Track REAL user typing (not autofill)
+            newInput.addEventListener('keydown', (e) => {
+                // Only count actual keyboard input
+                if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') {
+                    userHasTyped = true;
+                }
+            });
+            
+            // Only process input if user has actually typed
+            newInput.addEventListener('input', (e) => {
+                // REJECT autofill values
+                if (!userHasTyped) {
+                    newInput.value = '';
+                    return;
+                }
+                
+                // Extra safety: Reject email-like patterns
+                const value = newInput.value;
+                if (value.includes('@') && value.includes('.') && value.split('@').length === 2) {
+                    newInput.value = '';
+                    return;
+                }
+                
+                performSearch(newInput.value.trim());
+            });
+            
+            // Clear on focus if autofilled
+            newInput.addEventListener('focus', () => {
+                if (!userHasTyped && newInput.value) {
+                    newInput.value = '';
+                }
+            });
+            
+            // Clear on click
+            newInput.addEventListener('click', () => {
+                if (!userHasTyped && newInput.value) {
+                    newInput.value = '';
+                }
+            });
+            
+            // Focus the input
+            newInput.focus();
+            
+        }, 500); // 500ms delay before input becomes functional
+        
+        // EXTRA SAFETY: Monitor for value changes without user input
+        const observer = new MutationObserver(() => {
+            if (!userHasTyped && activeInput && activeInput.value) {
+                activeInput.value = '';
+            }
+        });
+        
+        observer.observe(newInput, {
+            attributes: true,
+            attributeFilter: ['value']
+        });
+        
+        // Cleanup observer after 3 seconds
+        setTimeout(() => observer.disconnect(), 3000);
+    });
+
+    function performSearch(query) {
+        // Never search without user typing
+        if (!searchActivated || !userHasTyped) {
+            searchResults.innerHTML = '';
+            return;
+        }
+        
+        // Reject email-like queries
+        if (query.includes('@') && !query.includes('/')) {
+            searchResults.innerHTML = '';
+            if (activeInput) activeInput.value = '';
+            return;
+        }
+    
+        let filteredFiles = data.files;
+    
+        if (currentFilter !== 'all') {
+            filteredFiles = data.categorized[currentFilter] || [];
+        }
+    
+        if (currentTypeFilter) {
+            filteredFiles = filteredFiles.filter(f =>
+                f.path.toLowerCase().endsWith(`.${currentTypeFilter}`)
+            );
+        }
+    
+        if (currentSizeFilter) {
+            filteredFiles = filteredFiles.filter(f => {
+                const size = f.size || 0;
+                if (currentSizeFilter === 'small') return size < 10240;
+                if (currentSizeFilter === 'medium') return size >= 10240 && size <= 102400;
+                if (currentSizeFilter === 'large') return size > 102400;
+                return true;
+            });
+        }
+    
+        let matches = filteredFiles;
+        if (query) {
+            matches = filteredFiles
+                .map(file => ({
+                    file,
+                    score: fuzzyMatch(file.path, query)
+                }))
+                .filter(item => item.score > 0)
+                .sort((a, b) => b.score - a.score)
+                .map(item => item.file)
+                .slice(0, 30);
+        } else {
+            matches = matches.slice(0, 30);
+        }
+    
+        if (matches.length === 0) {
+            searchResults.innerHTML = `
+                <div style="color: #8b949e; font-size: 13px; padding: 12px 0; text-align: center;">
+                    No files found ${query ? `matching "${query}"` : ''}
+                </div>`;
+            return;
+        }
+    
+        searchResults.innerHTML = `
+            <div style="color: #8b949e; font-size: 12px; margin-bottom: 12px;">
+                Found ${matches.length} file${matches.length !== 1 ? 's' : ''}
+            </div>
+            ${matches.map(file => `
+                <div class="file-item" data-path="${file.path}">
+                    <div class="file-name">${file.path.split('/').pop()}</div>
+                    <div class="file-path">${file.path}</div>
+                    ${file.size ? `<span class="file-type-badge">${formatBytes(file.size)}</span>` : ''}
+                </div>
+            `).join('')}
+        `;
+    
+        searchResults.querySelectorAll('.file-item[data-path]').forEach(el => {
+            const path = el.getAttribute('data-path');
+            el.style.cursor = 'pointer';
+    
+            el.addEventListener('click', (e) => {
+                const existing = el.querySelector('.file-recommendations');
+                if (existing) {
+                    existing.remove();
+                    return;
+                }
+    
+                const recsDiv = document.createElement('div');
+                recsDiv.className = 'file-recommendations';
+                recsDiv.style.cssText = `
+                    margin-top: 10px;
+                    padding: 10px;
+                    background: rgba(88, 166, 255, 0.05);
+                    border: 1px solid rgba(88, 166, 255, 0.2);
+                    border-radius: 6px;
+                `;
+    
+                recsDiv.innerHTML = `
+                    <button class="btn-secondary open-github-btn"
+                        style="width:100%; font-size:11px; padding:6px;">
+                        Open on GitHub
+                    </button>
+                `;
+    
+                el.appendChild(recsDiv);
+    
+                recsDiv.querySelector('.open-github-btn')
+                    .addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        window.open(
+                            `https://github.com/${owner}/${repo}/blob/${globalDefaultBranch}/${path}`,
+                            '_blank'
+                        );
+                    });
+    
+                e.stopPropagation();
+            });
+        });
+    }
+
+    filterBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            filterBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentFilter = btn.dataset.filter;
+            if (searchActivated && userHasTyped && activeInput) {
+                performSearch(activeInput.value.trim());
+            }
+        });
+    });
+
+    if (typeFilter) {
+        typeFilter.addEventListener('change', (e) => {
+            currentTypeFilter = e.target.value;
+            if (searchActivated && userHasTyped && activeInput) {
+                performSearch(activeInput.value.trim());
+            }
+        });
+    }
+
+    if (sizeFilter) {
+        sizeFilter.addEventListener('change', (e) => {
+            currentSizeFilter = e.target.value;
+            if (searchActivated && userHasTyped && activeInput) {
+                performSearch(activeInput.value.trim());
+            }
+        });
+    }
+}
 
     function setupCloneTools(container, owner, repo) {
         const cloneUrl = container.querySelector('#clone-url');
@@ -2858,11 +5355,20 @@
                 });
             });
         }
+
+        container.querySelectorAll('.copy-btn[data-copy]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                copyToClipboard(btn.dataset.copy, btn);
+            });
+        });
+        
     }
 
     function setupExportTools(container, data, owner, repo) {
         const jsonBtn = container.querySelector('#export-json-btn');
         const mdBtn = container.querySelector('#export-md-btn');
+        const mermaidBtn = container.querySelector('#export-mermaid-btn');
+        const mermaidDetailedBtn = container.querySelector('#export-mermaid-detailed-btn');
 
         if (jsonBtn) {
             jsonBtn.addEventListener('click', () => {
@@ -2919,7 +5425,34 @@
                 URL.revokeObjectURL(url);
             });
         }
+
+        if (mermaidBtn) {
+            mermaidBtn.addEventListener('click', () => {
+                const diagram = generateMermaidDiagram(data);
+                const blob = new Blob([diagram], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${repo}-architecture.mmd`;
+                a.click();
+                URL.revokeObjectURL(url);
+            });
+        }
+
+        if (mermaidDetailedBtn) {
+            mermaidDetailedBtn.addEventListener('click', () => {
+                const diagram = generateDetailedMermaid(data);
+                const blob = new Blob([diagram], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${repo}-detailed-structure.mmd`;
+                a.click();
+                URL.revokeObjectURL(url);
+            });
+        }
     }
+
 
     function setupVisualizationToggle(container, data, owner, repo) {
         // Don't initialize graph immediately - wait for tab click
@@ -2939,18 +5472,17 @@
         }
     }
 
-    window.copyToClipboard = function (text) {
+    function copyToClipboard(text, button) {
         navigator.clipboard.writeText(text).then(() => {
-            const btn = event.target;
-            const originalText = btn.textContent;
-            btn.textContent = 'Copied!';
-            btn.classList.add('copied');
+            const originalText = button.textContent;
+            button.textContent = 'Copied!';
+            button.classList.add('copied');
             setTimeout(() => {
-                btn.textContent = originalText;
-                btn.classList.remove('copied');
+                button.textContent = originalText;
+                button.classList.remove('copied');
             }, 2000);
         });
-    };
+    }
 
     function formatBytes(bytes) {
         if (!bytes || bytes === 0) return '0 Bytes';
@@ -2962,26 +5494,28 @@
 
     function showError(sidebar, message) {
         const content = sidebar.querySelector('#sidebar-main-content');
-
+    
         const tokenBanner = sidebar.querySelector('#token-setup-banner');
     
-        // Show token setup if it's a private repo issue
-        if (message.includes('private') || message.includes('404') || message.includes('not found')) {
+        // Show token setup banner for these errors
+        if (message.includes('private') || 
+            message.includes('404') || 
+            message.includes('not found') ||
+            message.includes('rate limit')) {
             if (tokenBanner) {
-            tokenBanner.style.display = 'block';
+                tokenBanner.style.display = 'block';
             }
         }
-
-        // Parse error message for better display
+    
         let errorTitle = 'Error Loading Repository';
         let errorMessage = message;
         let suggestions = [];
-
+    
         if (message.includes('rate limit')) {
             errorTitle = 'GitHub API Rate Limit Exceeded';
             suggestions = [
                 'Wait for the rate limit to reset',
-                'Add a GitHub personal access token (see console for instructions)',
+                'Add a GitHub personal access token to increase limit to 5000/hour',
                 'Try a smaller repository'
             ];
         } else if (message.includes('not found')) {
@@ -2989,7 +5523,8 @@
             suggestions = [
                 'Check that the repository exists',
                 'Make sure the URL is correct',
-                'Try refreshing the page'
+                'Try refreshing the page',
+                'Add a GitHub token if this is a private repository'
             ];
         } else if (message.includes('tree')) {
             errorTitle = 'Could Not Load Repository Files';
@@ -2999,7 +5534,7 @@
                 'Check your internet connection'
             ];
         }
-
+    
         content.innerHTML = `
             <div style="padding: 16px;">
                 <div class="error">
@@ -3017,7 +5552,6 @@
             </div>
         `;
     }
-
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {

@@ -1,6 +1,6 @@
 {
     "name": "github-codebase-navigator",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "Understand any GitHub codebase in minutes",
     "type": "module",
     "scripts": {

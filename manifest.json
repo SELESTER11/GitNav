@@ -2,7 +2,7 @@
     
     "manifest_version": 3,
     "name": "GitNav - GitHub Repository Navigator",
-    "version": "1.0.1",
+    "version": "2.0.0",
     "description": "Analyze any GitHub repository with interactive visualizations, dependency analysis, and smart insights. Navigate codebases faster.",
     "author": "Varun Karamchandani",
     "homepage_url": "https://github.com/SELESTER11/GitNav",
